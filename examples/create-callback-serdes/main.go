@@ -1,5 +1,9 @@
-// Command create-callback-serdes demonstrates CreateCallback that
-// receives structured data requiring custom deserialization handling.
+// Command create-callback-serdes demonstrates [durable.CreateCallback] with a
+// per-callback serializer set through [durable.WithCallbackSerdes]. A durable
+// Step sends structured JSON to the callback, and cb.Result decodes it with
+// the serializer passed here — [durable.JSONSerdes], the SDK default made
+// explicit. For a handler-wide callback decoder, see the
+// serde-callback-deserializer example and [durable.WithCallbackDeserializer].
 package main
 
 import (
@@ -28,7 +32,8 @@ type Result struct {
 
 func handler(ctx durable.Context, _ any) (Result, error) {
 	cb, err := durable.CreateCallback[CustomData](ctx, "custom-serdes-callback",
-		durable.WithCallbackTimeout(30*time.Second))
+		durable.WithCallbackTimeout(30*time.Second),
+		durable.WithCallbackSerdes(durable.JSONSerdes))
 	if err != nil {
 		return Result{}, err
 	}

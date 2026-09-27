@@ -1,6 +1,10 @@
-// Command wait-callback-serdes demonstrates WaitForCallback with custom
-// serialization/deserialization. The callback sends structured data that
-// is deserialized with a custom unmarshaler.
+// Command wait-callback-serdes demonstrates [durable.WaitForCallback] with a
+// per-callback serializer set through [durable.WithCallbackSerdes]. The
+// external submitter sends structured JSON, and the callback result is
+// decoded with the serializer passed here — [durable.JSONSerdes], the SDK
+// default made explicit. WithCallbackSerdes is the per-operation override;
+// for a handler-wide callback decoder see the serde-callback-deserializer
+// example and [durable.WithCallbackDeserializer].
 package main
 
 import (
@@ -56,6 +60,7 @@ func handler(ctx durable.Context, _ any) (Result, error) {
 			return err
 		},
 		durable.WithCallbackTimeout(30*time.Second),
+		durable.WithCallbackSerdes(durable.JSONSerdes),
 	)
 	if err != nil {
 		return Result{}, err
