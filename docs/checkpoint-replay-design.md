@@ -304,8 +304,8 @@ refuse the final write. The final write travels through the same flusher
 as every other request, so it is sent after any branch call already in
 flight and with the token that call rotated to. It is refused only when
 the service has stopped accepting this invocation's checkpoints (a response
-without a token, or a stale-token rejection), and then with the same error
-a branch checkpoint would receive.
+without a token, a stale-token rejection, or an execution-scoped failure),
+and then with the same error a branch checkpoint would receive.
 
 A deferred cleanup in `Invoke` releases the root handler's branch token
 once the response is decided. The handler goroutine releases that token

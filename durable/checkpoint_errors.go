@@ -2,6 +2,7 @@ package durable
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 
 	smithy "github.com/aws/smithy-go"
@@ -46,9 +47,10 @@ const (
 // returned from [ExecutionClient.Checkpoint] is wrapped in a
 // [CheckpointError] carrying the same scope. A ClientError returned from
 // [ExecutionClient.GetExecutionState] with [ErrorScopeExecution] fails the
-// execution instead of the invocation. A ClientError that handler or
-// plugin code returns is acted on like a CheckpointError of the same
-// scope: [ErrorScopeInvocation] ends the invocation with an error so the
+// execution instead of the invocation, and the FAILED response records
+// ErrorType "ClientError" with the ClientError's message. A ClientError
+// that handler or plugin code returns is acted on like a CheckpointError of
+// the same scope: [ErrorScopeInvocation] ends the invocation with an error so the
 // execution resumes later, and [ErrorScopeExecution] fails the execution.
 //
 // A Scope that is neither [ErrorScopeInvocation] nor [ErrorScopeExecution],
@@ -120,14 +122,20 @@ func (e *ClientError) effectiveScope() ErrorScope {
 // When a CheckpointError escapes the handler, the SDK reads its scope. An
 // invocation-scoped error ends the invocation with an error, so the
 // execution resumes in a later invocation from its last checkpoint. An
-// execution-scoped error ends the execution with a FAILED response. Handler
-// code that wants an ordinary failure should return its own error rather
-// than pass a CheckpointError through.
+// execution-scoped error ends the execution with a FAILED response.
+//
+// An execution-scoped checkpoint failure fails the execution whether or not
+// handler code returns the error. The SDK stops checkpointing the moment the
+// failure arrives. After the handler returns, the invocation responds
+// FAILED with the CheckpointError, whatever value or error the handler
+// returned: the operation whose checkpoint failed was never recorded, so no
+// outcome of the handler can be reported. Scope and Retryable still report
+// the classification, so handler code can read it.
 //
 // A stale-token rejection ends the invocation with an error even when the
-// handler does not pass it through. The SDK stops checkpointing the moment
-// the rejection arrives, and the invocation's outcome cannot be reported
-// with a token the service no longer accepts.
+// handler does not pass it through, for the same reason: the SDK stops
+// checkpointing the moment the rejection arrives, and the invocation's
+// outcome cannot be reported with a token the service no longer accepts.
 //
 // The same rule applies to the checkpoint the SDK makes on the handler's
 // behalf when a result is too large to return inline: an invocation-scoped
@@ -185,31 +193,46 @@ func IsCheckpointRetryable(err error) bool {
 // classifyCheckpointError wraps err as a *CheckpointError carrying the
 // scope of the failure. Returns nil for nil input.
 //
-// Classification rules, applied in order:
+// Classification rules, applied in order. The first rule that matches
+// decides the scope:
 //  1. *ClientError in the chain: the client stated the scope, so it is
 //     used as is. A client that states its own scope does not have to
 //     imitate the AWS SDK's error shape. See [ClientError] for how an
 //     unknown scope value is read.
-//  2. smithy.APIError in the chain:
-//     - ErrorCode is "InvalidParameterValueException" and the message
-//     starts with "Invalid checkpoint token" (compared without regard to
-//     case) → invocation scope, marked as a stale token. A newer
+//  2. smithy.APIError whose ErrorCode is one of the KMS codes
+//     "KMSAccessDeniedException", "KMSDisabledException",
+//     "KMSInvalidStateException", or "KMSNotFoundException" → execution
+//     scope. The service cannot use the function's KMS key, and a retry
+//     cannot fix that. These codes arrive as server faults, so this rule
+//     precedes the server-fault rule.
+//  3. smithy.APIError whose ErrorCode is "InvalidParameterValueException"
+//     and whose message starts with "Invalid checkpoint token", compared
+//     case-sensitively → invocation scope, marked as a stale token. A newer
 //     invocation has superseded this one, so the execution continues
 //     there. The token never becomes valid again, so the error is not
 //     retryable.
-//     - ErrorCode is "TooManyRequestsException" → invocation scope
-//     (throttling is FaultClient in the generated code but is the
-//     canonical retry case).
-//     - ErrorFault is FaultServer → invocation scope (5xx server fault).
-//     - Otherwise (FaultClient) → execution scope (invalid request).
-//  3. smithyhttp.ResponseError (HTTP response without a structured API
-//     error): status >= 500 → invocation scope, otherwise execution scope.
-//  4. Anything else (network errors, context cancellation, timeouts) →
-//     invocation scope. Transient conditions are the most common cause of
-//     unstructured errors, the retry loop is bounded, and assuming a
-//     failure is transient is the safe default: the execution gets another
-//     attempt rather than being failed on the strength of an error the SDK
-//     does not understand.
+//  4. smithy.APIError whose ErrorCode is "TooManyRequestsException" →
+//     invocation scope, retryable. Throttling is a client fault in the
+//     generated code but is the canonical retry case.
+//  5. smithy.APIError whose ErrorFault is FaultServer → invocation scope,
+//     retryable.
+//  6. Any other smithy.APIError, a client fault, including an
+//     "InvalidParameterValueException" with any other message → execution
+//     scope. The service rejected the request.
+//  7. smithyhttp.ResponseError, an HTTP response without a modeled error
+//     code: status 429 → invocation scope, because it is throttling;
+//     status 500 or above → invocation scope; any other status →
+//     execution scope.
+//  8. Anything else, such as a network error, a context deadline, or a
+//     timeout → invocation scope, retryable. Transient conditions are the
+//     most common cause of unstructured errors, the retry loop is bounded,
+//     and assuming a failure is transient is the safe default: the
+//     execution gets another attempt rather than being failed on the
+//     strength of an error the SDK does not understand.
+//
+// An execution-scoped checkpoint failure halts the checkpointer. The
+// invocation then responds FAILED with the failure, whatever the handler
+// returns. See [CheckpointError].
 func classifyCheckpointError(err error) *CheckpointError {
 	if err == nil {
 		return nil
@@ -224,15 +247,24 @@ func classifyCheckpointError(err error) *CheckpointError {
 // rejection of a checkpoint token that a newer invocation has superseded.
 const (
 	staleTokenErrorCode     = "InvalidParameterValueException"
-	staleTokenMessagePrefix = "invalid checkpoint token"
+	staleTokenMessagePrefix = "Invalid checkpoint token"
 )
+
+// kmsErrorCodes are the error codes the service returns when it cannot use
+// the function's KMS key. Each one fails the execution.
+var kmsErrorCodes = map[string]bool{
+	"KMSAccessDeniedException": true,
+	"KMSDisabledException":     true,
+	"KMSInvalidStateException": true,
+	"KMSNotFoundException":     true,
+}
 
 // isStaleTokenRejection reports whether err is the service's rejection of
 // a superseded checkpoint token: a smithy.APIError with code
 // [staleTokenErrorCode] whose message starts with
-// [staleTokenMessagePrefix], compared without regard to case. A
-// *ClientError in the chain takes precedence: the client stated the scope
-// itself, so the shape of its cause is not inspected.
+// [staleTokenMessagePrefix], compared case-sensitively. A *ClientError in
+// the chain takes precedence: the client stated the scope itself, so the
+// shape of its cause is not inspected.
 func isStaleTokenRejection(err error) bool {
 	var clientErr *ClientError
 	if errors.As(err, &clientErr) {
@@ -245,9 +277,7 @@ func isStaleTokenRejection(err error) bool {
 	if apiErr.ErrorCode() != staleTokenErrorCode {
 		return false
 	}
-	msg := apiErr.ErrorMessage()
-	return len(msg) >= len(staleTokenMessagePrefix) &&
-		strings.EqualFold(msg[:len(staleTokenMessagePrefix)], staleTokenMessagePrefix)
+	return strings.HasPrefix(apiErr.ErrorMessage(), staleTokenMessagePrefix)
 }
 
 // clientErrorScope derives the [ErrorScope] of a failed [ExecutionClient]
@@ -261,6 +291,9 @@ func clientErrorScope(err error) ErrorScope {
 
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
+		if kmsErrorCodes[apiErr.ErrorCode()] {
+			return ErrorScopeExecution
+		}
 		if apiErr.ErrorCode() == "TooManyRequestsException" {
 			return ErrorScopeInvocation
 		}
@@ -272,7 +305,8 @@ func clientErrorScope(err error) ErrorScope {
 
 	var respErr *smithyhttp.ResponseError
 	if errors.As(err, &respErr) {
-		if respErr.HTTPStatusCode() >= 500 {
+		status := respErr.HTTPStatusCode()
+		if status == http.StatusTooManyRequests || status >= 500 {
 			return ErrorScopeInvocation
 		}
 		return ErrorScopeExecution

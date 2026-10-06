@@ -2,7 +2,9 @@ package durable
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -245,5 +247,95 @@ func TestMissingTokenOnOversizedResultEndsInvocationPending(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("checkpoint calls = %d, want 1", got)
+	}
+}
+
+// rejectedRequest is the service's rejection of a checkpoint request that a
+// retry cannot fix: a client fault that is not a stale token.
+func rejectedRequest() error {
+	return &smithy.GenericAPIError{
+		Code:    "InvalidParameterValueException",
+		Message: "STEP output payload size must be less than or equal to 262144 bytes.",
+		Fault:   smithy.FaultClient,
+	}
+}
+
+// assertFailedWithCheckpointError checks that an invocation responded
+// FAILED with a CheckpointError, not an error return or a success.
+func assertFailedWithCheckpointError(t *testing.T, raw []byte, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("Invoke returned error %v, want a FAILED response", err)
+	}
+	var resp struct {
+		Status string
+		Error  *struct{ ErrorType, ErrorMessage string }
+	}
+	if jerr := json.Unmarshal(raw, &resp); jerr != nil {
+		t.Fatalf("parse response %s: %v", raw, jerr)
+	}
+	if resp.Status != "FAILED" || resp.Error == nil {
+		t.Fatalf("response = %s, want FAILED with an error", raw)
+	}
+	if resp.Error.ErrorType != "CheckpointError" {
+		t.Errorf("ErrorType = %q, want CheckpointError", resp.Error.ErrorType)
+	}
+	if !strings.Contains(resp.Error.ErrorMessage, "262144 bytes") {
+		t.Errorf("ErrorMessage = %q, want the service's message", resp.Error.ErrorMessage)
+	}
+}
+
+func TestExecutionScopedFailureHaltsCheckpointer(t *testing.T) {
+	// An execution-scoped failure is not retried, and the checkpointer
+	// refuses every later checkpoint.
+	fake, calls := countingClient(func(CheckpointInput) (CheckpointOutput, error) {
+		return CheckpointOutput{}, rejectedRequest()
+	})
+
+	cp := newCheckpointer(fake, "arn:test", "token-0")
+	err := cp.checkpoint(context.Background(), nil)
+	var ce *CheckpointError
+	if !errors.As(err, &ce) || ce.Scope() != ErrorScopeExecution || ce.Retryable() {
+		t.Fatalf("checkpoint() = %v, want non-retryable execution-scoped *CheckpointError", err)
+	}
+	if halt := cp.haltCause(); !errors.Is(halt, ce) {
+		t.Errorf("haltCause() = %v, want the classified error", halt)
+	}
+	if err := cp.checkpoint(context.Background(), nil); !errors.Is(err, errCheckpointTerminated) {
+		t.Errorf("second checkpoint() = %v, want errCheckpointTerminated", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("checkpoint calls = %d, want 1", got)
+	}
+}
+
+func TestExecutionScopedFailureFailsExecution(t *testing.T) {
+	// The handler passes the rejection through. The invocation responds
+	// FAILED with the CheckpointError.
+	fake, calls := countingClient(func(CheckpointInput) (CheckpointOutput, error) {
+		return CheckpointOutput{}, rejectedRequest()
+	})
+
+	h := Wrap(twoStepsThenReturn, withLambdaAPI(fake))
+	raw, err := h(context.Background(), stepPayload(`"evt"`))
+	assertFailedWithCheckpointError(t, raw, err)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("checkpoint calls = %d, want 1", got)
+	}
+}
+
+func TestExecutionScopedFailureFailsExecutionWhenHandlerSwallowsIt(t *testing.T) {
+	// Handler code that ignores the step error and returns a value cannot
+	// turn a rejected checkpoint into a success: the recorded halt cause
+	// overrides the handler's outcome.
+	fake, calls := countingClient(func(CheckpointInput) (CheckpointOutput, error) {
+		return CheckpointOutput{}, rejectedRequest()
+	})
+
+	h := Wrap(twoStepsSwallowErrors, withLambdaAPI(fake))
+	raw, err := h(context.Background(), stepPayload(`"evt"`))
+	assertFailedWithCheckpointError(t, raw, err)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("checkpoint calls = %d, want 1 (second step is refused locally)", got)
 	}
 }

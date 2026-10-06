@@ -103,8 +103,10 @@ type checkpointer struct {
 	// service will accept no further checkpoints from this invocation. It
 	// is the error the invocation must end with, whatever the handler
 	// returns: errSuspendExecution when a checkpoint response carried no
-	// token, or the stale-token *CheckpointError when the service rejected
-	// the token as superseded. The first cause recorded wins. Guarded by mu.
+	// token, the stale-token *CheckpointError when the service rejected
+	// the token as superseded, or an execution-scoped *CheckpointError when
+	// the service rejected a call in a way that fails the execution. The
+	// first cause recorded wins. Guarded by mu.
 	haltErr error
 
 	// state is the shared execution state. When non-nil, the checkpointer
@@ -177,6 +179,13 @@ func (cp *checkpointer) loadStateFrom(ctx context.Context, marker string) ([]*op
 			Marker:          next,
 		})
 		if err != nil {
+			// A client that states the failure's scope is reported
+			// with its own type and message, so a FAILED response
+			// records the client error rather than this wrapper.
+			var clientErr *ClientError
+			if errors.As(err, &clientErr) {
+				return nil, clientErr
+			}
 			return nil, fmt.Errorf("durable: load execution state: %w", err)
 		}
 		for _, op := range out.Operations {
@@ -236,10 +245,12 @@ func (cp *checkpointer) haltCause() error {
 // throttling) fail immediately. On any failure the token remains unchanged
 // and every request in the failed call receives the error.
 //
-// Two outcomes halt the checkpointer for the rest of the invocation. A
+// Three outcomes halt the checkpointer for the rest of the invocation. A
 // stale-token rejection (see [CheckpointError]) returns the classified
-// error and ends the invocation with it. A response without a token
-// returns errCheckpointTerminated and ends the invocation with PENDING.
+// error and ends the invocation with it. An execution-scoped failure
+// returns the classified error and makes the invocation respond FAILED
+// with it. A response without a token returns errCheckpointTerminated and
+// ends the invocation with PENDING.
 // Every later call returns errCheckpointTerminated.
 //
 // If ctx is done before the updates are sent, checkpoint returns ctx.Err()
@@ -263,8 +274,9 @@ func (cp *checkpointer) checkpoint(ctx context.Context, updates []OperationUpdat
 // is sent after any call already in flight and with the token that call
 // rotated to. It is refused only when the service has stopped accepting
 // this invocation's checkpoints: after a response without a token it
-// returns errCheckpointTerminated, and after a stale-token rejection it
-// returns that rejection, exactly as checkpoint would.
+// returns errCheckpointTerminated, and after a stale-token rejection or an
+// execution-scoped failure it returns that error, exactly as checkpoint
+// would.
 //
 // Only the invocation goroutine calls checkpointFinal, at most once, after
 // the handler's outcome is decided. Branch checkpoints never use it.
@@ -426,6 +438,15 @@ func (cp *checkpointer) send(batch []*pendingCheckpoint, token string) error {
 				cp.halt(classified)
 				return classified
 			}
+			if classified.Scope() == ErrorScopeExecution {
+				// The service rejected the call in a way no retry can
+				// fix, and the operations it carried were not
+				// recorded. Halt: later checkpoint calls are refused,
+				// and the invocation responds FAILED with this error
+				// even if handler code catches it and returns a value.
+				cp.halt(classified)
+				return classified
+			}
 			if !classified.Retryable() {
 				return classified
 			}
@@ -500,7 +521,8 @@ func (cp *checkpointer) send(batch []*pendingCheckpoint, token string) error {
 // once the checkpointer has halted because the service stopped accepting
 // this invocation's checkpoints: with errCheckpointTerminated after a
 // response without a token, so the invocation responds PENDING, or with the
-// stale-token rejection, so the invocation ends with it.
+// recorded stale-token rejection or execution-scoped failure, so the
+// invocation ends with it.
 func (cp *checkpointer) refusal(final bool) error {
 	if !cp.terminated.Load() {
 		return nil

@@ -454,8 +454,10 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 				// invocation the service no longer follows. End with
 				// the cause the checkpointer recorded instead:
 				// errSuspendExecution (PENDING) when a response carried
-				// no token, or the stale-token error (an invocation
-				// failure) when a newer invocation superseded this one.
+				// no token, the stale-token error (an invocation
+				// failure) when a newer invocation superseded this one,
+				// or an execution-scoped checkpoint error (FAILED) when
+				// the service rejected a checkpoint.
 				return nil, halt
 			}
 			if errors.Is(out.err, errSuspendExecution) {
@@ -479,9 +481,9 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 				}
 				ec.suspend.awaitDrain(ctx, settle)
 				if halt := cp.haltCause(); halt != nil {
-					// A branch's checkpoint met a stale-token
-					// rejection while draining; that ends the
-					// invocation with an error, as below.
+					// A branch's checkpoint halted the checkpointer
+					// while draining; the invocation ends with the
+					// recorded cause, as above.
 					return nil, halt
 				}
 				return nil, errSuspendExecution
@@ -513,9 +515,9 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 			case <-ctx.Done():
 			}
 			if halt := cp.haltCause(); halt != nil {
-				// Same override as above: a stale-token rejection ends
-				// the invocation with an error even when every branch
-				// has since blocked.
+				// Same override as above: the recorded cause decides
+				// the outcome even when every branch has since
+				// blocked.
 				return nil, halt
 			}
 			return nil, errSuspendExecution

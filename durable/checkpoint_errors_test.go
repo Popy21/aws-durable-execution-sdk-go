@@ -50,17 +50,62 @@ func TestClassifyCheckpointError(t *testing.T) {
 			stale:     true,
 		},
 		{
-			// The prefix is compared without regard to case so a change
-			// in the service's capitalization does not fail executions.
-			name: "stale checkpoint token in another case",
+			// The prefix is compared case-sensitively. A message that
+			// matches only without regard to case is an ordinary
+			// invalid request.
+			name: "stale-token message in another case",
 			err: &smithy.GenericAPIError{
 				Code:    "InvalidParameterValueException",
 				Message: "Invalid Checkpoint Token",
 				Fault:   smithy.FaultClient,
 			},
-			scope:     ErrorScopeInvocation,
+			scope:     ErrorScopeExecution,
 			retryable: false,
-			stale:     true,
+		},
+		{
+			name: "stale-token message in lowercase",
+			err: &smithy.GenericAPIError{
+				Code:    "InvalidParameterValueException",
+				Message: "invalid checkpoint token: superseded",
+				Fault:   smithy.FaultClient,
+			},
+			scope:     ErrorScopeExecution,
+			retryable: false,
+		},
+		{
+			// KMS codes are server faults but fail the execution.
+			name:      "KMSAccessDeniedException server fault",
+			err:       &smithy.GenericAPIError{Code: "KMSAccessDeniedException", Fault: smithy.FaultServer},
+			scope:     ErrorScopeExecution,
+			retryable: false,
+		},
+		{
+			name:      "KMSDisabledException server fault",
+			err:       &smithy.GenericAPIError{Code: "KMSDisabledException", Fault: smithy.FaultServer},
+			scope:     ErrorScopeExecution,
+			retryable: false,
+		},
+		{
+			name:      "KMSInvalidStateException server fault",
+			err:       &smithy.GenericAPIError{Code: "KMSInvalidStateException", Fault: smithy.FaultServer},
+			scope:     ErrorScopeExecution,
+			retryable: false,
+		},
+		{
+			name:      "wrapped KMSNotFoundException server fault",
+			err:       fmt.Errorf("operation error: %w", &smithy.GenericAPIError{Code: "KMSNotFoundException", Fault: smithy.FaultServer}),
+			scope:     ErrorScopeExecution,
+			retryable: false,
+		},
+		{
+			// A bare 429 with no modeled code is throttling.
+			name: "bare HTTP 429",
+			err: &smithyhttp.ResponseError{
+				Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusTooManyRequests}},
+				Err:      errors.New("Too Many Requests"),
+			},
+			scope:     ErrorScopeInvocation,
+			retryable: true,
 		},
 		{
 			name: "wrapped stale checkpoint token",

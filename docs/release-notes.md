@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Fixed: checkpoint failures are classified by one table, and a rejected checkpoint fails the execution
+
+A failed checkpoint or state-load call is now classified by these rules,
+applied in order. The first rule that matches decides the outcome.
+
+1. A `*ClientError` in the error chain: its stated scope. An unknown or
+   zero scope is `ErrorScopeInvocation`.
+2. An API error with code `KMSAccessDeniedException`,
+   `KMSDisabledException`, `KMSInvalidStateException`, or
+   `KMSNotFoundException`: `ErrorScopeExecution`. The execution fails.
+   These codes arrive as server faults, so before this change they ended
+   the invocation and the service invoked the execution again.
+3. An `InvalidParameterValueException` whose message starts with
+   `Invalid checkpoint token`: a stale token. The invocation ends with an
+   error and the execution continues in the newer invocation. The prefix
+   is now compared case-sensitively. A message that matches only without
+   regard to case, such as `invalid checkpoint token: superseded`, is an
+   ordinary rejected request and fails the execution.
+4. `TooManyRequestsException`: `ErrorScopeInvocation`, retried.
+5. Any other server fault: `ErrorScopeInvocation`, retried.
+6. Any other client fault: `ErrorScopeExecution`. The execution fails.
+7. An HTTP response with no modeled error code: status 429 or status 500
+   and above is `ErrorScopeInvocation`; any other status is
+   `ErrorScopeExecution`. A bare 429 is throttling, so it now ends the
+   invocation for a re-invoke instead of failing the execution.
+8. Anything else, such as a network error or a timeout:
+   `ErrorScopeInvocation`, retried.
+
+An execution-scoped checkpoint failure now fails the execution whether or
+not handler code returns the error. The SDK stops checkpointing when the
+failure arrives. After the handler returns, the invocation responds
+`FAILED` with the `*CheckpointError`, whatever the handler returned.
+Before, a handler that caught the `*CheckpointError` and returned a value
+made the execution finish `SUCCEEDED`, although the operation whose
+checkpoint the service rejected was never recorded. A step result over the
+service's payload limit is one such rejection. `CheckpointError.Scope()`
+and `CheckpointError.Retryable()` still report the classification.
+
+A state load that fails with an execution-scoped `*ClientError` now records
+the client error's own type and message in the `FAILED` response:
+`ErrorType` is `ClientError`. Before, it recorded `ErrorType` `Error` and
+the message `durable: load execution state: ...`.
+
 ### Changed: an operation that finishes during the invocation resumes it
 
 An awaited operation that finishes while the same invocation is still
