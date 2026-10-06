@@ -71,7 +71,10 @@ func TestRetrySucceedsOnLaterAttempt(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	first := runner.Run(t, "x")
+	first, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", first.Status, first.Error)
 	}
@@ -91,7 +94,10 @@ func TestRetrySucceedsOnLaterAttempt(t *testing.T) {
 	if !runner.CompletePendingTimers() {
 		t.Fatal("no pending backoff wait to complete")
 	}
-	second := runner.Run(t, "x")
+	second, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", second.Status, second.Error)
 	}
@@ -131,7 +137,10 @@ func TestRetryExhaustionReturnsRetryError(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "x")
+	result, err := runner.RunUntilComplete("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED", result.Status)
 	}
@@ -185,7 +194,10 @@ func TestRetrySuspensionInsideAttemptIsNotAFailure(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	first := runner.Run(t, "x")
+	first, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", first.Status, first.Error)
 	}
@@ -201,7 +213,10 @@ func TestRetrySuspensionInsideAttemptIsNotAFailure(t *testing.T) {
 	if !runner.CompletePendingTimers() {
 		t.Fatal("no pending wait to complete")
 	}
-	second := runner.Run(t, "x")
+	second, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", second.Status, second.Error)
 	}
@@ -245,11 +260,16 @@ func TestRetryReplayOfCompletedGroupDoesNotReExecute(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	if r := runner.Run(t, "x"); r.Status != durabletest.Pending {
+	if r, err := runner.Run("x"); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", r.Status, r.Error)
 	}
 	runner.CompletePendingTimers()
-	second := runner.Run(t, "x")
+	second, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Pending {
 		t.Fatalf("second invocation status = %s, want PENDING; error = %+v", second.Status, second.Error)
 	}
@@ -262,7 +282,10 @@ func TestRetryReplayOfCompletedGroupDoesNotReExecute(t *testing.T) {
 	strategyCallsBefore := len(seen)
 
 	runner.CompletePendingTimers()
-	third := runner.Run(t, "x")
+	third, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if third.Status != durabletest.Succeeded {
 		t.Fatalf("third invocation status = %s, want SUCCEEDED; error = %+v", third.Status, third.Error)
 	}
@@ -307,7 +330,10 @@ func TestRetryWithoutChildContext(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "x")
+	result, err := runner.RunUntilComplete("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED; error = %+v", result.Status, result.Error)
 	}
@@ -353,7 +379,10 @@ func TestRetryAttemptChildOptionsApply(t *testing.T) {
 				return "lower", nil
 			}, durable.NoRetry(), durable.WithAttemptChildOptions(durable.WithChildSerdes(upperCaseSerdes{})))
 		}
-		result := durabletest.NewLocalRunner(handler).RunUntilComplete(t, "x")
+		result, err := durabletest.NewLocalRunner(handler).RunUntilComplete("x")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if result.Status != durabletest.Succeeded {
 			t.Fatalf("status = %s, want SUCCEEDED; error = %+v", result.Status, result.Error)
 		}
@@ -383,7 +412,10 @@ func TestRetryAttemptChildOptionsApply(t *testing.T) {
 			errors.As(err, &retryErr)
 			return "", err
 		}
-		result := durabletest.NewLocalRunner(handler).RunUntilComplete(t, "x")
+		result, err := durabletest.NewLocalRunner(handler).RunUntilComplete("x")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if result.Status != durabletest.Failed {
 			t.Fatalf("status = %s, want FAILED", result.Status)
 		}
@@ -412,7 +444,11 @@ func TestRetryBackoffDelay(t *testing.T) {
 			retryErr = err
 			return "", err
 		}
-		return durabletest.NewLocalRunner(handler).Run(t, "x"), retryErr
+		result, err := durabletest.NewLocalRunner(handler).Run("x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result, retryErr
 	}
 
 	t.Run("zero selects default", func(t *testing.T) {
@@ -449,7 +485,10 @@ func TestRetryUnnamed(t *testing.T) {
 			return "ok", nil
 		}, retryEvery(2, &seen))
 	}
-	result := durabletest.NewLocalRunner(handler).RunUntilComplete(t, "x")
+	result, err := durabletest.NewLocalRunner(handler).RunUntilComplete("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED; error = %+v", result.Status, result.Error)
 	}
@@ -479,7 +518,10 @@ func TestRetryRejectsInvalidArguments(t *testing.T) {
 			_, got = durable.Retry(ctx, "g", noop, nil)
 			return "", got
 		}
-		result := durabletest.NewLocalRunner(handler).Run(t, "x")
+		result, err := durabletest.NewLocalRunner(handler).Run("x")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if result.Status != durabletest.Failed || len(result.Operations) != 0 {
 			t.Fatalf("status = %s with %d operations, want FAILED with none", result.Status, len(result.Operations))
 		}
@@ -494,7 +536,10 @@ func TestRetryRejectsInvalidArguments(t *testing.T) {
 			_, got = durable.Retry[string](ctx, "g", nil, durable.NoRetry())
 			return "", got
 		}
-		result := durabletest.NewLocalRunner(handler).Run(t, "x")
+		result, err := durabletest.NewLocalRunner(handler).Run("x")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if result.Status != durabletest.Failed || len(result.Operations) != 0 {
 			t.Fatalf("status = %s with %d operations, want FAILED with none", result.Status, len(result.Operations))
 		}

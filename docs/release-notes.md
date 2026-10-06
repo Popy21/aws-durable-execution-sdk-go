@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Breaking: `durabletest` runners return an error instead of taking `*testing.T`
+
+The runner methods no longer take a `*testing.T`. They return the result
+and an error:
+
+```go
+func (r *LocalRunner[I, O]) Run(event I) (*TestResult, error)
+func (r *LocalRunner[I, O]) RunUntilComplete(event I, opts ...RunnerOption) (*TestResult, error)
+func (r *CloudRunner) Run(ctx context.Context, event any) (*TestResult, error)
+func (r *CloudRunner) RunWithArn(ctx context.Context, executionArn string) (*TestResult, error)
+```
+
+So a handler can run under the local runner from a plain `main` package,
+with no `testing` import. The `CloudRunner` methods pass `ctx` to the
+Lambda `Invoke` call and to every poll, so a caller can cancel a run or
+set a deadline on it.
+
+The error is non-nil, and the result nil, only when the runner itself
+fails. For `LocalRunner` that is an event that does not marshal to JSON,
+an invocation error that indicates an SDK or runner bug, or a response
+that does not parse. For `CloudRunner` it is a failed `Invoke` call, an
+invoke response with no `DurableExecutionArn`, a failed or timed-out poll,
+or the end of `ctx`. A handler that returns an error still produces a nil
+error and a `Failed` result. A run blocked on a callback or invoke
+produces a `Pending` result, and a run that reaches the invocation cap
+sets `CapReached`.
+
+`ResultAs` on a `Failed` result now includes `TestResult.Error.Type` and
+`TestResult.Error.Message` in its error message.
+
+`AssertGoldenSignature`, `AssertGoldenSignatureUnordered`,
+`AssertSignatureContains`, and `AssertSignatureExcludes` take a
+`testing.TB` instead of a `*testing.T`, so benchmarks and fuzz tests can
+call them.
+
+To migrate a test, drop the `t` argument, pass a context to the
+`CloudRunner` methods, and fail the test on a runner error:
+
+```go
+result, err := runner.RunUntilComplete(input)
+if err != nil {
+	t.Fatal(err)
+}
+```
+
 ### Plugin instrumentation API: dispatch contract documented
 
 The plugin instrumentation API stays experimental. `durable.Plugin`,

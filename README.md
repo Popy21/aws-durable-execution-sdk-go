@@ -740,7 +740,10 @@ func TestHandler(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, 41)
+	result, err := runner.RunUntilComplete(41)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
@@ -755,13 +758,49 @@ func TestHandler(t *testing.T) {
 }
 ```
 
+The runner methods return an error only when the runner itself fails, for
+example when the event does not marshal to JSON. The handler's outcome is
+in the result. A handler that returns an error produces a nil error and a
+result with `Status` set to `Failed` and the recorded error in `Error`. A
+run blocked on a callback or an invoke has `Status` set to `Pending`, and
+a run that reaches the invocation cap has `CapReached` set. `ResultAs`
+returns an error for any result that did not succeed, and for a failed
+handler its message includes the recorded error type and message.
+
+The runners take no test handle, so the same calls work in a plain `main`
+package, for example a program you start with `go run` during local
+development.
+
+```go
+func main() {
+	handler := func(ctx durable.Context, name string) (string, error) {
+		return durable.Step(ctx, "greet", func(_ durable.StepContext) (string, error) {
+			return "hello, " + name, nil
+		})
+	}
+
+	result, err := durabletest.NewLocalRunner(handler).RunUntilComplete("world")
+	if err != nil {
+		log.Fatal(err) // the runner failed
+	}
+	out, err := durabletest.ResultAs[string](result)
+	if err != nil {
+		log.Fatal(err) // the handler failed, is pending, or the result did not decode
+	}
+	fmt.Println(out)
+}
+```
+
 `TestResult` also lists every recorded operation in `Operations`, so a test
 can assert that a step ran once across replays. `SendCallbackSuccess`,
 `SendCallbackFailure`, and `SendCallbackHeartbeat` resolve a callback the
 handler is blocked on. `CompleteChainedInvoke` and `FailChainedInvoke`
 resolve an `Invoke`. `RegisterFunction` registers a handler for a function
 name so that `Invoke` runs it in process. `NewCloudRunner` runs the same
-assertions against a deployed function.
+assertions against a deployed function. Its `Run` and `RunWithArn` methods
+take a `context.Context`, which bounds the invoke and every poll. The
+assertion helpers, such as `AssertGoldenSignature`, take a `testing.TB`,
+so benchmarks and fuzz tests can call them.
 
 ## Logging
 

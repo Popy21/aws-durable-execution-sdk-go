@@ -154,7 +154,10 @@ func assertSignature(t *testing.T, client *lambda.Client, name, arn string) {
 	if err != nil {
 		t.Fatalf("read signature declaration: %v", err)
 	}
-	result := durabletest.NewCloudRunner(client, name).RunWithArn(t, arn)
+	result, err := durabletest.NewCloudRunner(client, name).RunWithArn(t.Context(), arn)
+	if err != nil {
+		t.Fatal(err)
+	}
 	extest.AssertCloudSignature(t, result, mode, dir)
 }
 

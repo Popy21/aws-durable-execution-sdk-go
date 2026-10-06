@@ -23,7 +23,11 @@ func TestHandler(t *testing.T) {
 	// so iterate: resolve any registered invokes, re-invoke, repeat.
 	var result *durabletest.TestResult
 	for attempt := 0; attempt < 20; attempt++ {
-		result = runner.RunUntilComplete(t, nil)
+		var err error
+		result, err = runner.RunUntilComplete(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if result.Status == durabletest.Succeeded {
 			break
 		}

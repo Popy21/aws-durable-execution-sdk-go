@@ -80,7 +80,10 @@ func TestVirtualChildSuspendsAndReplays(t *testing.T) {
 			bodyRuns.Store(0)
 			stepRuns.Store(0)
 			runner := durabletest.NewLocalRunner(handler)
-			result := runner.RunUntilComplete(t, nil)
+			result, err := runner.RunUntilComplete(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if result.Status != durabletest.Succeeded {
 				t.Fatalf("status = %s, want SUCCEEDED (error %v)", result.Status, result.Error)
 			}
@@ -149,7 +152,10 @@ func TestVirtualChildFirstInCheckpointedChildReplays(t *testing.T) {
 			return virtualWaitRun{Value: v + tail, BodyRuns: outerRuns.Load(), StepRuns: tailRuns.Load(), Replaying: replaying}, nil
 		})
 	})
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED (error %v)", result.Status, result.Error)
 	}
@@ -250,7 +256,10 @@ func TestEmptyVirtualChildPreservesReplay(t *testing.T) {
 					return body(ctx)
 				}
 				runner := durabletest.NewLocalRunner(handler)
-				result := runner.RunUntilComplete(t, nil)
+				result, err := runner.RunUntilComplete(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
 				if result.Status != durabletest.Succeeded {
 					t.Fatalf("status = %s, want SUCCEEDED (error %v)", result.Status, result.Error)
 				}
@@ -345,7 +354,10 @@ func TestVirtualChildHookReplayFlags(t *testing.T) {
 		t.Run(variant, func(t *testing.T) {
 			rec := &virtualHookRecorder{}
 			runner := durabletest.NewLocalRunner(handler, durable.WithPlugins(rec.plugin()))
-			result := runner.RunUntilComplete(t, nil)
+			result, err := runner.RunUntilComplete(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if result.Status != durabletest.Succeeded {
 				t.Fatalf("status = %s, want SUCCEEDED (error %v)", result.Status, result.Error)
 			}

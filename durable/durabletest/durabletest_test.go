@@ -43,7 +43,10 @@ func TestStepSucceeded(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.Run(t, orderInput{OrderID: "ord-123", Amount: 50})
+	result, err := runner.Run(orderInput{OrderID: "ord-123", Amount: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -94,7 +97,10 @@ func TestStepMultiple(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.Run(t, "input")
+	result, err := runner.Run("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -117,7 +123,10 @@ func TestWaitSuspends(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.Run(t, "go")
+	result, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
@@ -148,7 +157,10 @@ func TestHandlerFails(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.Run(t, "input")
+	result, err := runner.Run("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED, got %s", result.Status)
@@ -184,7 +196,10 @@ func TestReplayDoesNotReExecute(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// First invocation: step executes, wait suspends.
-	r1 := runner.Run(t, "go")
+	r1, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r1.Status != durabletest.Pending {
 		t.Fatalf("first Run: expected PENDING, got %s", r1.Status)
 	}
@@ -194,7 +209,10 @@ func TestReplayDoesNotReExecute(t *testing.T) {
 
 	// Second invocation: step replays (does NOT re-execute), wait
 	// suspends again.
-	r2 := runner.Run(t, "go")
+	r2, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r2.Status != durabletest.Pending {
 		t.Fatalf("second Run: expected PENDING, got %s", r2.Status)
 	}
@@ -223,14 +241,20 @@ func TestTokenRotation(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// First invocation checkpoints the step, gets PENDING on wait.
-	r1 := runner.Run(t, "go")
+	r1, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r1.Status != durabletest.Pending {
 		t.Fatalf("first Run: expected PENDING, got %s", r1.Status)
 	}
 
 	// Second invocation replays step, suspends on wait again.
 	// If token rotation is broken, checkpoint would fail.
-	r2 := runner.Run(t, "go")
+	r2, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r2.Status != durabletest.Pending {
 		t.Fatalf("second Run: expected PENDING, got %s", r2.Status)
 	}
@@ -264,7 +288,11 @@ func TestGoroutineSafety(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			runner := durabletest.NewLocalRunner(handler)
-			result := runner.Run(t, 3)
+			result, err := runner.Run(3)
+			if err != nil {
+				t.Error(err)
+				return
+			}
 			if result.Status != durabletest.Succeeded {
 				t.Errorf("expected SUCCEEDED, got %s", result.Status)
 			}
@@ -290,7 +318,10 @@ func TestEmptyResult(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.Run(t, "input")
+	result, err := runner.Run("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -324,7 +355,10 @@ func TestRunUntilCompleteStepWithRetry(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -372,7 +406,10 @@ func TestRunUntilCompleteRetryableErrorsStopOnNonMatch(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED, got %s", result.Status)
@@ -412,7 +449,10 @@ func TestRunUntilCompleteWaitAdvances(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -442,7 +482,10 @@ func TestRunUntilCompleteBlocksOnCallback(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "request")
+	result, err := runner.RunUntilComplete("request")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Should be PENDING because callback needs external resolution.
 	if result.Status != durabletest.Pending {
@@ -466,7 +509,10 @@ func TestCallbackSuccessFlow(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// Run until blocked on callback.
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -486,7 +532,10 @@ func TestCallbackSuccessFlow(t *testing.T) {
 	}
 
 	// Run again to complete.
-	result = runner.RunUntilComplete(t, "input")
+	result, err = runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s (error: %+v)", result.Status, result.Error)
 	}
@@ -519,7 +568,10 @@ func TestCallbackFailureSurfacesCallbackError(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// Run until blocked on callback.
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -535,7 +587,10 @@ func TestCallbackFailureSurfacesCallbackError(t *testing.T) {
 
 	// Run again — the external failure surfaces as CallbackExternalError,
 	// and the execution fails with that wire type and the external message.
-	result = runner.RunUntilComplete(t, "input")
+	result, err = runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED, got %s", result.Status)
 	}
@@ -566,7 +621,10 @@ func TestCallbackHeartbeat(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// Run until blocked on callback.
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -599,7 +657,10 @@ func TestChainedInvokeSuccess(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// First run: invoke is started, suspends.
-	result := runner.RunUntilComplete(t, "hello")
+	result, err := runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -610,7 +671,10 @@ func TestChainedInvokeSuccess(t *testing.T) {
 	}
 
 	// Run again — should succeed.
-	result = runner.RunUntilComplete(t, "hello")
+	result, err = runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s (error: %+v)", result.Status, result.Error)
 	}
@@ -640,7 +704,10 @@ func TestChainedInvokeFailure(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// First run: invoke is started, suspends.
-	result := runner.RunUntilComplete(t, "hello")
+	result, err := runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -651,7 +718,10 @@ func TestChainedInvokeFailure(t *testing.T) {
 	}
 
 	// Run again — should fail with InvokeError.
-	result = runner.RunUntilComplete(t, "hello")
+	result, err = runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED, got %s", result.Status)
 	}
@@ -676,7 +746,10 @@ func TestChainedInvokeTimeout(t *testing.T) {
 
 	runner := durabletest.NewLocalRunner(handler)
 
-	result := runner.RunUntilComplete(t, "hello")
+	result, err := runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -689,7 +762,10 @@ func TestChainedInvokeTimeout(t *testing.T) {
 		t.Error("second TimeoutChainedInvoke succeeded, want error")
 	}
 
-	result = runner.RunUntilComplete(t, "hello")
+	result, err = runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED, got %s", result.Status)
 	}
@@ -730,7 +806,10 @@ func TestInvocationCapReached(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go", durabletest.WithMaxInvocations(3))
+	result, err := runner.RunUntilComplete("go", durabletest.WithMaxInvocations(3))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Should return with CapReached since the step retries forever.
 	if !result.CapReached {
@@ -756,7 +835,10 @@ func TestCompletePendingTimersManual(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// Single invocation: wait suspends.
-	result := runner.Run(t, "go")
+	result, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected PENDING, got %s", result.Status)
 	}
@@ -774,7 +856,10 @@ func TestCompletePendingTimersManual(t *testing.T) {
 	}
 
 	// Re-invoke: wait is SUCCEEDED, handler completes.
-	result = runner.Run(t, "go")
+	result, err = runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
 	}
@@ -792,7 +877,10 @@ func TestOperationAccessorByName(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	op := result.Operation("step-a")
 	if op == nil {
@@ -837,7 +925,10 @@ func TestOperationAccessorByIndex(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	op := result.OperationByIndex(0)
 	if op == nil {
@@ -874,7 +965,10 @@ func TestOperationAccessorByID(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Get the first operation's ID.
 	if len(result.Operations) == 0 {
@@ -916,7 +1010,10 @@ func TestOperationsByType(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	steps := result.OperationsByType("STEP")
 	if len(steps) != 2 {
@@ -971,7 +1068,10 @@ func TestWaitForConditionStateRoundTripUnderLocalRunner(t *testing.T) {
 			},
 		})
 	}
-	res := durabletest.NewLocalRunner(h).RunUntilComplete(t, nil, durabletest.WithMaxInvocations(6))
+	res, err := durabletest.NewLocalRunner(h).RunUntilComplete(nil, durabletest.WithMaxInvocations(6))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("WaitForCondition never converged: status=%v capReached=%v statesSeen=%v", res.Status, res.CapReached, seenStates)
 	}
@@ -1012,7 +1112,10 @@ func TestWaitForConditionAttemptNumber(t *testing.T) {
 			},
 		})
 	}
-	res := durabletest.NewLocalRunner(h).RunUntilComplete(t, nil, durabletest.WithMaxInvocations(6))
+	res, err := durabletest.NewLocalRunner(h).RunUntilComplete(nil, durabletest.WithMaxInvocations(6))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("WaitForCondition never converged: status=%v capReached=%v attemptsSeen=%v", res.Status, res.CapReached, seen)
 	}

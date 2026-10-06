@@ -67,14 +67,20 @@ func TestSelectReplayKeepsWinnerWhenTimingReverses(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	first := runner.Run(t, "x")
+	first, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", first.Status, first.Error)
 	}
 	if !runner.CompletePendingTimers() {
 		t.Fatal("no pending wait to complete")
 	}
-	second := runner.Run(t, "x")
+	second, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", second.Status, second.Error)
 	}
@@ -132,14 +138,20 @@ func TestSelectReplayKeepsFailedWinner(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	first := runner.Run(t, "x")
+	first, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", first.Status, first.Error)
 	}
 	if !runner.CompletePendingTimers() {
 		t.Fatal("no pending wait to complete")
 	}
-	second := runner.Run(t, "x")
+	second, err := runner.Run("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", second.Status, second.Error)
 	}

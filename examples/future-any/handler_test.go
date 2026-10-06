@@ -14,7 +14,10 @@ func TestHandler(t *testing.T) {
 	// Test success case: at least one future succeeds.
 	t.Run("success", func(t *testing.T) {
 		runner := durabletest.NewLocalRunner(handler)
-		result := runner.RunUntilComplete(t, Input{ShouldFail: false})
+		result, err := runner.RunUntilComplete(Input{ShouldFail: false})
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if result.Status != durabletest.Succeeded {
 			t.Fatalf("expected Succeeded, got %s", result.Status)
@@ -42,7 +45,10 @@ func TestHandler(t *testing.T) {
 	// Test all-fail case: CombinatorError wraps all individual errors.
 	t.Run("all-fail", func(t *testing.T) {
 		runner := durabletest.NewLocalRunner(handler)
-		result := runner.RunUntilComplete(t, Input{ShouldFail: true})
+		result, err := runner.RunUntilComplete(Input{ShouldFail: true})
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if result.Status != durabletest.Succeeded {
 			t.Fatalf("expected Succeeded (handler catches error), got %s", result.Status)

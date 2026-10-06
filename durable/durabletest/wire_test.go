@@ -53,7 +53,10 @@ func TestWirePayloadReadByDurable(t *testing.T) {
 	// the invoke; resolving the invoke lets it record every operation the
 	// payload below must name.
 	discovery := NewLocalRunner(handler)
-	first := discovery.Run(t, "event")
+	first, err := discovery.Run("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != Pending {
 		t.Fatalf("discovery status = %s, want PENDING", first.Status)
 	}
@@ -64,14 +67,20 @@ func TestWirePayloadReadByDurable(t *testing.T) {
 	if err := discovery.SendCallbackSuccess(cbs[0].CallbackID, "discovery-callback"); err != nil {
 		t.Fatal(err)
 	}
-	first = discovery.Run(t, "event")
+	first, err = discovery.Run("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != Pending {
 		t.Fatalf("discovery status after callback = %s, want PENDING", first.Status)
 	}
 	if err := discovery.CompleteChainedInvoke("invoke", "discovery-invoke"); err != nil {
 		t.Fatal(err)
 	}
-	first = discovery.RunUntilComplete(t, "event")
+	first, err = discovery.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != Succeeded {
 		t.Fatalf("discovery status after invoke = %s, want SUCCEEDED", first.Status)
 	}
@@ -168,7 +177,10 @@ func TestWireErrorReadByDurable(t *testing.T) {
 	}
 
 	discovery := NewLocalRunner(handler)
-	first := discovery.Run(t, "event")
+	first, err := discovery.Run("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	stepOp := first.Operation("step")
 	if stepOp == nil {
 		t.Fatal("discovery run recorded no step operation")
@@ -234,7 +246,9 @@ func TestBuildPayloadDecodesAsWireInput(t *testing.T) {
 			return n * 2, nil
 		})
 	})
-	if got := runner.RunUntilComplete(t, 21); got.Status != Succeeded {
+	if got, err := runner.RunUntilComplete(21); err != nil {
+		t.Fatal(err)
+	} else if got.Status != Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", got.Status)
 	}
 

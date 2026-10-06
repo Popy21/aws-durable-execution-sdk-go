@@ -18,7 +18,10 @@ func TestHandler(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, input)
+	result, err := runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Execution suspends because invokes need external resolution.
 	if result.Status != durabletest.Pending {
@@ -30,7 +33,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete invoke: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

@@ -12,7 +12,10 @@ import (
 
 func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The submitter returns an error directly with NoRetry strategy.
 	// The handler catches it and reports it in the result.

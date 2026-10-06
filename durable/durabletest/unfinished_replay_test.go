@@ -45,13 +45,22 @@ func TestUnfinishedReplayInLastBranchReturns(t *testing.T) {
 	}
 
 	r := durabletest.NewLocalRunner(h)
-	done := make(chan *durabletest.TestResult, 1)
+	type outcome struct {
+		res *durabletest.TestResult
+		err error
+	}
+	done := make(chan outcome, 1)
 	go func() {
-		done <- r.RunUntilComplete(t, nil, durabletest.WithMaxInvocations(4))
+		res, err := r.RunUntilComplete(nil, durabletest.WithMaxInvocations(4))
+		done <- outcome{res, err}
 	}()
 	var res *durabletest.TestResult
 	select {
-	case res = <-done:
+	case o := <-done:
+		if o.err != nil {
+			t.Fatal(o.err)
+		}
+		res = o.res
 	case <-time.After(5 * time.Second):
 		t.Fatal("invocation never returned: parked branch with no pending commitment and no other active branch")
 	}

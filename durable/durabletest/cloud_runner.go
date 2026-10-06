@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -82,10 +81,11 @@ const (
 //
 // # Example
 //
-//	cfg, _ := config.LoadDefaultConfig(context.Background())
+//	ctx := context.Background()
+//	cfg, _ := config.LoadDefaultConfig(ctx)
 //	client := lambda.NewFromConfig(cfg)
 //	runner := durabletest.NewCloudRunner(client, "my-function:$LATEST")
-//	result := runner.Run(t, `{"orderId": "123"}`)
+//	result, err := runner.Run(ctx, `{"orderId": "123"}`)
 type CloudRunner struct {
 	api          DurableExecutionAPI
 	functionName string
@@ -114,52 +114,50 @@ func NewCloudRunner(api DurableExecutionAPI, functionName string, opts ...CloudR
 	}
 }
 
-// Run invokes the function with event (JSON-encoded), polls until
-// terminal, and returns the [TestResult]. It calls t.Fatal on
-// infrastructure errors.
-func (r *CloudRunner) Run(t *testing.T, event any) *TestResult {
-	t.Helper()
-
-	ctx := context.Background()
-
-	// Marshal event payload.
+// Run invokes the function with event (JSON-encoded), polls until the
+// execution reaches a terminal status, and returns the [TestResult]. Run
+// passes ctx to the Lambda Invoke call and to every poll, so a deadline or
+// cancellation on ctx ends the run.
+//
+// The returned error is non-nil only when the runner itself fails: the
+// event does not marshal to JSON, the Invoke call fails, the invoke
+// response has no DurableExecutionArn, polling fails or exceeds the
+// [WithTimeout] limit, or ctx ends. The result is then nil. An execution
+// that fails produces a nil error and a [Failed] result with the recorded
+// error in [TestResult.Error].
+func (r *CloudRunner) Run(ctx context.Context, event any) (*TestResult, error) {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		t.Fatalf("durabletest.CloudRunner: marshal event: %v", err)
+		return nil, fmt.Errorf("durabletest.CloudRunner: marshal event: %w", err)
 	}
 
-	// Invoke the function.
 	invokeOut, err := r.api.Invoke(ctx, &lambda.InvokeInput{
 		FunctionName: aws.String(r.functionName),
 		Payload:      payload,
 	})
 	if err != nil {
-		t.Fatalf("durabletest.CloudRunner: invoke %q: %v", r.functionName, err)
+		return nil, fmt.Errorf("durabletest.CloudRunner: invoke %q: %w", r.functionName, err)
 	}
 
 	executionArn := aws.ToString(invokeOut.DurableExecutionArn)
 	if executionArn == "" {
-		t.Fatalf("durabletest.CloudRunner: invoke response has no DurableExecutionArn — is %q a qualified durable function?", r.functionName)
+		return nil, fmt.Errorf("durabletest.CloudRunner: invoke response has no DurableExecutionArn — is %q a qualified durable function?", r.functionName)
 	}
-
-	// Poll until terminal.
-	result, err := r.pollUntilTerminal(ctx, executionArn)
-	if err != nil {
-		t.Fatalf("durabletest.CloudRunner: %v", err)
-	}
-	return result
+	return r.RunWithArn(ctx, executionArn)
 }
 
-// RunWithArn polls an already-started execution by ARN until terminal.
-// Use this when the execution was started externally (e.g. async invoke).
-func (r *CloudRunner) RunWithArn(t *testing.T, executionArn string) *TestResult {
-	t.Helper()
-
-	result, err := r.pollUntilTerminal(context.Background(), executionArn)
+// RunWithArn polls an already-started execution by ARN until it reaches a
+// terminal status. Use this when the execution was started externally
+// (e.g. async invoke). The error contract is the one [CloudRunner.Run]
+// states, minus the Invoke call: the error is non-nil, and the result
+// nil, only when polling fails, exceeds the [WithTimeout] limit, or ctx
+// ends.
+func (r *CloudRunner) RunWithArn(ctx context.Context, executionArn string) (*TestResult, error) {
+	result, err := r.pollUntilTerminal(ctx, executionArn)
 	if err != nil {
-		t.Fatalf("durabletest.CloudRunner: %v", err)
+		return nil, fmt.Errorf("durabletest.CloudRunner: %w", err)
 	}
-	return result
+	return result, nil
 }
 
 // SendCallbackSuccess resolves a pending callback with a success payload,

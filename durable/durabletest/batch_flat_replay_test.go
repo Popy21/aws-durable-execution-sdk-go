@@ -35,7 +35,10 @@ func TestFlatSequentialSideEffectReexecutes(t *testing.T) {
 		}
 		return atomic.LoadInt32(&sideRuns), nil
 	}
-	res := durabletest.NewLocalRunner(h).RunUntilComplete(t, nil)
+	res, err := durabletest.NewLocalRunner(h).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", res.Status)
 	}
@@ -66,7 +69,10 @@ func TestFlatSequentialReplayIDDrift(t *testing.T) {
 		}
 		return "ok", nil
 	}
-	res := durabletest.NewLocalRunner(h).RunUntilComplete(t, nil)
+	res, err := durabletest.NewLocalRunner(h).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", res.Status)
 	}

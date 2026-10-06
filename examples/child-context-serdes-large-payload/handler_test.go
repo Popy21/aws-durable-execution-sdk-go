@@ -20,7 +20,10 @@ func TestHandlerDefaultPath(t *testing.T) {
 	t.Setenv("SERDES_BASE_PATH", "")
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
@@ -47,7 +50,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("SERDES_BASE_PATH", serdesDir)
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)

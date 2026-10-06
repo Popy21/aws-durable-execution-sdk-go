@@ -11,7 +11,10 @@ import (
 func TestHandler(t *testing.T) {
 	records := plugintest.RecordTo(t, out)
 	runner := durabletest.NewLocalRunner(handler, durable.WithPlugins(plugin))
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED", result.Status)
 	}

@@ -52,7 +52,10 @@ func TestRegisteredDurableTargetSuccess(t *testing.T) {
 	runner := durabletest.NewLocalRunner(callerHandler)
 	runner.RegisterFunction(pricingFn, durabletest.DurableFunction(pricing))
 
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "widget", Quantity: 4})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "widget", Quantity: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED (error: %+v)", result.Status, result.Error)
 	}
@@ -89,7 +92,10 @@ func TestRegisteredDurableTargetRunExecutesTarget(t *testing.T) {
 
 	// The first invocation suspends on the invoke; the target runs before
 	// Run returns, so the operation is already settled.
-	first := runner.Run(t, priceRequest{SKU: "a", Quantity: 7})
+	first, err := runner.Run(priceRequest{SKU: "a", Quantity: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first status = %s, want PENDING", first.Status)
 	}
@@ -97,7 +103,10 @@ func TestRegisteredDurableTargetRunExecutesTarget(t *testing.T) {
 		t.Fatalf("quote after first Run = %+v, want SUCCEEDED", op)
 	}
 
-	second := runner.Run(t, priceRequest{SKU: "a", Quantity: 7})
+	second, err := runner.Run(priceRequest{SKU: "a", Quantity: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second status = %s, want SUCCEEDED", second.Status)
 	}
@@ -142,7 +151,10 @@ func TestRegisteredDurableTargetFailure(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction(pricingFn, durabletest.DurableFunction(pricing))
 
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "widget", Quantity: 1})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "widget", Quantity: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED", result.Status)
 	}
@@ -199,13 +211,17 @@ func TestRegisteredTargetErrorShapeMatchesStub(t *testing.T) {
 	// Stubbed path.
 	stubHandler, stubSeen := capture()
 	stub := durabletest.NewLocalRunner(stubHandler)
-	if r := stub.RunUntilComplete(t, priceRequest{}); r.Status != durabletest.Pending {
+	if r, err := stub.RunUntilComplete(priceRequest{}); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("stub first status = %s, want PENDING", r.Status)
 	}
 	if err := stub.FailChainedInvoke("quote", "Error", "boom"); err != nil {
 		t.Fatal(err)
 	}
-	if r := stub.RunUntilComplete(t, priceRequest{}); r.Status != durabletest.Failed {
+	if r, err := stub.RunUntilComplete(priceRequest{}); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Failed {
 		t.Fatalf("stub second status = %s, want FAILED", r.Status)
 	}
 
@@ -215,7 +231,9 @@ func TestRegisteredTargetErrorShapeMatchesStub(t *testing.T) {
 	reg.RegisterFunction(pricingFn, durabletest.PlainFunction(func(context.Context, priceRequest) (priceQuote, error) {
 		return priceQuote{}, errors.New("boom")
 	}))
-	if r := reg.RunUntilComplete(t, priceRequest{}); r.Status != durabletest.Failed {
+	if r, err := reg.RunUntilComplete(priceRequest{}); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Failed {
 		t.Fatalf("registered status = %s, want FAILED", r.Status)
 	}
 
@@ -245,7 +263,10 @@ func TestRegisteredDurableTargetSuspendsAndResumes(t *testing.T) {
 	runner := durabletest.NewLocalRunner(callerHandler)
 	runner.RegisterFunction(pricingFn, durabletest.DurableFunction(pricing))
 
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "w", Quantity: 5})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "w", Quantity: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED (error: %+v)", result.Status, result.Error)
 	}
@@ -278,7 +299,10 @@ func TestRegisteredDurableTargetBlockedOnCallbackStaysOpen(t *testing.T) {
 	runner := durabletest.NewLocalRunner(callerHandler)
 	runner.RegisterFunction(pricingFn, durabletest.DurableFunction(pricing))
 
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "w"})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "w"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING while the target awaits its callback", result.Status)
 	}
@@ -298,7 +322,10 @@ func TestRegisteredPlainTargetSuccess(t *testing.T) {
 		return priceQuote{SKU: req.SKU, Total: req.Quantity * 10}, nil
 	}))
 
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "bolt", Quantity: 3})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "bolt", Quantity: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED (error: %+v)", result.Status, result.Error)
 	}
@@ -335,7 +362,10 @@ func TestRegisteredPlainTargetFailureTypes(t *testing.T) {
 				return priceQuote{}, tc.err
 			}))
 
-			result := runner.RunUntilComplete(t, priceRequest{})
+			result, err := runner.RunUntilComplete(priceRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if result.Status != durabletest.Failed {
 				t.Fatalf("status = %s, want FAILED", result.Status)
 			}
@@ -373,7 +403,10 @@ func TestUnregisteredInvokeStillStubbed(t *testing.T) {
 	}))
 
 	// The registered target settles; the unregistered one blocks.
-	result := runner.RunUntilComplete(t, priceRequest{Quantity: 40})
+	result, err := runner.RunUntilComplete(priceRequest{Quantity: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING on the unregistered invoke", result.Status)
 	}
@@ -387,7 +420,10 @@ func TestUnregisteredInvokeStillStubbed(t *testing.T) {
 	if err := runner.CompleteChainedInvoke("tax", 2); err != nil {
 		t.Fatal(err)
 	}
-	result = runner.RunUntilComplete(t, priceRequest{Quantity: 40})
+	result, err = runner.RunUntilComplete(priceRequest{Quantity: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}
@@ -416,7 +452,10 @@ func TestRegisteredDurableTargetInvokesUnregisteredTarget(t *testing.T) {
 
 	// The target runs, reaches its own unregistered invoke, and blocks.
 	// The caller's invoke of the target therefore stays open too.
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "eur", Quantity: 3})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "eur", Quantity: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING while the target awaits its invoke", result.Status)
 	}
@@ -436,7 +475,10 @@ func TestRegisteredDurableTargetInvokesUnregisteredTarget(t *testing.T) {
 	if err := runner.CompleteChainedInvoke("fx", 7); err != nil {
 		t.Fatalf("CompleteChainedInvoke(fx): %v", err)
 	}
-	result = runner.RunUntilComplete(t, priceRequest{SKU: "eur", Quantity: 3})
+	result, err = runner.RunUntilComplete(priceRequest{SKU: "eur", Quantity: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED (error: %+v)", result.Status, result.Error)
 	}
@@ -466,13 +508,18 @@ func TestRegisteredDurableTargetInvokeFailedThroughRunner(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction(pricingFn, durabletest.DurableFunction(fxCaller))
 
-	if r := runner.RunUntilComplete(t, priceRequest{SKU: "eur"}); r.Status != durabletest.Pending {
+	if r, err := runner.RunUntilComplete(priceRequest{SKU: "eur"}); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", r.Status)
 	}
 	if err := runner.FailChainedInvoke("fx", "RateUnavailable", "no rate for eur"); err != nil {
 		t.Fatalf("FailChainedInvoke(fx): %v", err)
 	}
-	result := runner.RunUntilComplete(t, priceRequest{SKU: "eur"})
+	result, err := runner.RunUntilComplete(priceRequest{SKU: "eur"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED", result.Status)
 	}
@@ -503,7 +550,9 @@ func TestChainedInvokeNameOpenInSeveralExecutionsIsRejected(t *testing.T) {
 
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction("target-fn", durabletest.DurableFunction(target))
-	if r := runner.RunUntilComplete(t, 1); r.Status != durabletest.Pending {
+	if r, err := runner.RunUntilComplete(1); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", r.Status)
 	}
 
@@ -519,7 +568,10 @@ func TestChainedInvokeNameOpenInSeveralExecutionsIsRejected(t *testing.T) {
 	}
 
 	// Nothing was settled: both invokes are still open.
-	result := runner.RunUntilComplete(t, 1)
+	result, err := runner.RunUntilComplete(1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status after rejected completion = %s, want PENDING", result.Status)
 	}
@@ -531,7 +583,9 @@ func TestChainedInvokeNameOpenInSeveralExecutionsIsRejected(t *testing.T) {
 func TestUnknownChainedInvokeNameStillReportsNotFound(t *testing.T) {
 	runner := durabletest.NewLocalRunner(callerHandler)
 	runner.RegisterFunction(pricingFn, durabletest.DurableFunction(fxCaller))
-	if r := runner.RunUntilComplete(t, priceRequest{SKU: "eur"}); r.Status != durabletest.Pending {
+	if r, err := runner.RunUntilComplete(priceRequest{SKU: "eur"}); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", r.Status)
 	}
 	err := runner.CompleteChainedInvoke("no-such-invoke", 1)
@@ -557,7 +611,10 @@ func TestRunReportsCapReachedByRegisteredTarget(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction("spinner-fn", durabletest.DurableFunction(waitForever))
 
-	result := runner.Run(t, 1)
+	result, err := runner.Run(1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}
@@ -576,7 +633,10 @@ func TestRunUntilCompleteReportsCapReachedByRegisteredTarget(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction("spinner-fn", durabletest.DurableFunction(waitForever))
 
-	result := runner.RunUntilComplete(t, 1, durabletest.WithMaxInvocations(5))
+	result, err := runner.RunUntilComplete(1, durabletest.WithMaxInvocations(5))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}
@@ -603,7 +663,10 @@ func TestRegisteredTargetsNest(t *testing.T) {
 	runner.RegisterFunction("outer-fn", durabletest.DurableFunction(outer))
 	runner.RegisterFunction("inner-fn", durabletest.PlainFunction(inner))
 
-	result := runner.RunUntilComplete(t, 20)
+	result, err := runner.RunUntilComplete(20)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED (error: %+v)", result.Status, result.Error)
 	}
@@ -641,7 +704,10 @@ func TestRegisteredTargetRecursionIsBounded(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction(self, durabletest.DurableFunction(recurse))
 
-	result := runner.RunUntilComplete(t, 0)
+	result, err := runner.RunUntilComplete(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED (recursion must be bounded)", result.Status)
 	}

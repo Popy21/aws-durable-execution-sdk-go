@@ -13,7 +13,10 @@ import (
 func TestHandlerWaitsPastExecutionTimeout(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
-	result := runner.Run(t, "event")
+	result, err := runner.Run("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING while the wait is open", result.Status)
 	}
@@ -47,7 +50,10 @@ func TestHandlerAsDurableTarget(t *testing.T) {
 	runner := durabletest.NewLocalRunner(caller)
 	runner.RegisterFunction("slow-target", durabletest.DurableFunction(handler))
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED; error = %+v", result.Status, result.Error)
 	}

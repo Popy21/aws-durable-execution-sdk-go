@@ -86,7 +86,7 @@ func IsCloud() bool {
 // New creates a runner for the handler under test. In local mode opts are
 // passed to [durabletest.NewLocalRunner]; in cloud mode they are ignored,
 // because the deployed function is already configured.
-func New[I, O any](t *testing.T, handler durable.Handler[I, O], opts ...durable.HandlerOption) *Runner[I, O] {
+func New[I, O any](t testing.TB, handler durable.Handler[I, O], opts ...durable.HandlerOption) *Runner[I, O] {
 	t.Helper()
 	switch mode := os.Getenv(EnvRunner); mode {
 	case "", "local":
@@ -133,26 +133,41 @@ func TargetFunction(name string) string {
 // [durabletest.LocalRunner.RunUntilComplete] and
 // [durabletest.CloudRunner.Run]. In cloud mode the first call starts the
 // execution and waits for it to finish; later calls return that result.
-func (r *Runner[I, O]) RunUntilComplete(t *testing.T, event I) *durabletest.TestResult {
+// When the runner itself fails, RunUntilComplete fails the test with the
+// runner's error.
+func (r *Runner[I, O]) RunUntilComplete(t testing.TB, event I) *durabletest.TestResult {
 	t.Helper()
 	if r.local != nil {
-		return r.local.RunUntilComplete(t, event)
+		return must(t)(r.local.RunUntilComplete(event))
 	}
 	if r.cloudResult == nil {
-		r.cloudResult = r.cloud.Run(t, event)
+		r.cloudResult = must(t)(r.cloud.Run(t.Context(), event))
 	}
 	return r.cloudResult
 }
 
 // Run performs a single invocation locally. The cloud has no
 // single-invocation step, so in cloud mode Run behaves like
-// [Runner.RunUntilComplete].
-func (r *Runner[I, O]) Run(t *testing.T, event I) *durabletest.TestResult {
+// [Runner.RunUntilComplete]. When the runner itself fails, Run fails the
+// test with the runner's error.
+func (r *Runner[I, O]) Run(t testing.TB, event I) *durabletest.TestResult {
 	t.Helper()
 	if r.local != nil {
-		return r.local.Run(t, event)
+		return must(t)(r.local.Run(event))
 	}
 	return r.RunUntilComplete(t, event)
+}
+
+// must returns a function that fails t when a runner returns a non-nil
+// error and otherwise returns the runner's result.
+func must(t testing.TB) func(*durabletest.TestResult, error) *durabletest.TestResult {
+	return func(result *durabletest.TestResult, err error) *durabletest.TestResult {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
 }
 
 // RegisterFunction registers fn as the local target of chained invokes of
@@ -249,7 +264,7 @@ func (r *Runner[I, O]) localOnly(method string) {
 
 // exampleName is the example's directory name. A Go test binary runs with
 // its package directory as the working directory.
-func exampleName(t *testing.T) string {
+func exampleName(t testing.TB) string {
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {
@@ -266,7 +281,7 @@ var (
 
 // cloudClient builds the Lambda client once per test binary from the
 // default AWS configuration.
-func cloudClient(t *testing.T) *lambda.Client {
+func cloudClient(t testing.TB) *lambda.Client {
 	t.Helper()
 	clientOnce.Do(func() {
 		cfg, err := config.LoadDefaultConfig(context.Background())

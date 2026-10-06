@@ -18,7 +18,10 @@ func runAcrossSuspension(t *testing.T, event Event) *durabletest.TestResult {
 	t.Helper()
 	runner := durabletest.NewLocalRunner(handler)
 
-	first := runner.Run(t, event)
+	first, err := runner.Run(event)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING (the wait must suspend)", first.Status)
 	}
@@ -26,7 +29,10 @@ func runAcrossSuspension(t *testing.T, event Event) *durabletest.TestResult {
 		t.Fatal("no pending timer to complete after the first invocation")
 	}
 
-	result := runner.Run(t, event)
+	result, err := runner.Run(event)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED", result.Status)
 	}

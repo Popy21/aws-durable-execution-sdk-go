@@ -13,11 +13,42 @@
 // # Quick Start
 //
 //	runner := durabletest.NewLocalRunner(myHandler)
-//	result := runner.RunUntilComplete(t, myInput)
-//	if result.Status != durabletest.Succeeded {
-//	    t.Fatalf("expected SUCCEEDED, got %s", result.Status)
+//	result, err := runner.RunUntilComplete(myInput)
+//	if err != nil {
+//	    t.Fatal(err) // the runner failed
 //	}
 //	output, err := durabletest.ResultAs[MyOutput](result)
+//	if err != nil {
+//	    t.Fatal(err) // the handler failed, is pending, or the result did not decode
+//	}
+//
+// The runners do not take a test handle, so the same calls work in a plain
+// main package, for example a program started with go run during local
+// development.
+//
+// # Errors
+//
+// The runner methods return a non-nil error only when the runner itself
+// fails, and the [TestResult] is then nil:
+//
+//   - [LocalRunner.Run] and [LocalRunner.RunUntilComplete]: the event does
+//     not marshal to JSON, the invocation returns an error that indicates
+//     an SDK or runner bug, or the response does not parse.
+//   - [CloudRunner.Run] and [CloudRunner.RunWithArn]: the Lambda Invoke
+//     call fails, the invoke response has no DurableExecutionArn, polling
+//     fails, or the context ends.
+//
+// The outcome of the handler is not an error. A handler that returns an
+// error produces a nil error and a result with Status [Failed] and the
+// recorded error in [TestResult.Error]. A run blocked on a callback or
+// invoke produces a nil error and Status [Pending]. A run that reaches the
+// invocation cap produces a nil error and [TestResult.CapReached] set to
+// true. [ResultAs] returns an error for any result that did not succeed;
+// for a failed handler its message includes the recorded error type and
+// message.
+//
+// The assertion helpers, such as [AssertGoldenSignature], take a
+// [testing.TB], so tests, benchmarks, and fuzz tests can call them.
 //
 // # Execution Model
 //
@@ -31,16 +62,16 @@
 // For handlers that use callbacks or chained invokes, use RunUntilComplete
 // to reach the PENDING state, then resolve the pending operation:
 //
-//	result := runner.RunUntilComplete(t, input) // returns PENDING
-//	cbs := runner.OpenCallbacks()               // enumerate pending callbacks
+//	result, err := runner.RunUntilComplete(input) // returns PENDING
+//	cbs := runner.OpenCallbacks()                 // enumerate pending callbacks
 //	runner.SendCallbackSuccess(cbs[0].CallbackID, "payload")
-//	result = runner.RunUntilComplete(t, input)  // now reaches SUCCEEDED
+//	result, err = runner.RunUntilComplete(input)  // now reaches SUCCEEDED
 //
 // Chained invokes follow the same pattern:
 //
-//	result := runner.RunUntilComplete(t, input)   // PENDING on invoke
-//	runner.CompleteChainedInvoke("invoke-op", result)
-//	result = runner.RunUntilComplete(t, input)    // SUCCEEDED
+//	result, err := runner.RunUntilComplete(input) // PENDING on invoke
+//	runner.CompleteChainedInvoke("invoke-op", reply)
+//	result, err = runner.RunUntilComplete(input)  // SUCCEEDED
 //
 // # Multi-Function Tests
 //
@@ -58,7 +89,7 @@
 //	runner := durabletest.NewLocalRunner(orderHandler)
 //	runner.RegisterFunction("pricing-function", durabletest.DurableFunction(pricingHandler))
 //	runner.RegisterFunction("tax-function", durabletest.PlainFunction(taxHandler))
-//	result := runner.RunUntilComplete(t, order) // runs both targets; SUCCEEDED
+//	result, err := runner.RunUntilComplete(order) // runs both targets; SUCCEEDED
 //
 // Invokes of identifiers that are not registered still block for
 // [LocalRunner.CompleteChainedInvoke], [LocalRunner.FailChainedInvoke], or
@@ -97,7 +128,10 @@
 // runners populate them, so a test can assert on the event order or the
 // number of invocations an execution needed in either environment:
 //
-//	result := runner.RunUntilComplete(t, input)
+//	result, err := runner.RunUntilComplete(input)
+//	if err != nil {
+//	    t.Fatal(err)
+//	}
 //	if got := len(result.Invocations); got != 3 {
 //	    t.Fatalf("invocations = %d, want 3", got)
 //	}

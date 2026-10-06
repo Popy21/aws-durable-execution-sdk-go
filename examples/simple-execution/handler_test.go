@@ -13,7 +13,10 @@ import (
 
 func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, json.RawMessage(`{"key":"value"}`))
+	result, err := runner.RunUntilComplete(json.RawMessage(`{"key":"value"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)

@@ -5,8 +5,8 @@ package durabletest_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-durable-execution-sdk-go/durable"
@@ -42,10 +42,14 @@ func Example() {
 
 	// Create a local runner and run the handler to completion.
 	// RunUntilComplete automatically advances the wait timer between
-	// invocations.
-	t := &testing.T{} // in real tests, use the *testing.T passed to your test function
+	// invocations. It returns an error only when the runner itself fails;
+	// the handler's outcome is in the result.
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "order-42")
+	result, err := runner.RunUntilComplete("order-42")
+	if err != nil {
+		fmt.Println("Runner error:", err)
+		return
+	}
 
 	fmt.Println("Status:", result.Status)
 
@@ -96,12 +100,15 @@ func ExampleLocalRunner_RegisterFunction() {
 		return subtotal + taxDue, nil
 	}
 
-	t := &testing.T{} // in real tests, use the *testing.T passed to your test function
 	runner := durabletest.NewLocalRunner(handler)
 	runner.RegisterFunction("pricing-function", durabletest.DurableFunction(pricing))
 	runner.RegisterFunction("tax-function", durabletest.PlainFunction(tax))
 
-	result := runner.RunUntilComplete(t, order{Quantity: 3})
+	result, err := runner.RunUntilComplete(order{Quantity: 3})
+	if err != nil {
+		fmt.Println("Runner error:", err)
+		return
+	}
 	fmt.Println("Status:", result.Status)
 
 	total, err := durabletest.ResultAs[int](result)
@@ -116,4 +123,28 @@ func ExampleLocalRunner_RegisterFunction() {
 	// Status: SUCCEEDED
 	// Total: 33
 	// Price invoke: SUCCEEDED
+}
+
+// This example runs a handler that fails. The runner's error is nil,
+// because the runner did its job; the result reports the failure, and
+// ResultAs returns an error that names the handler's error.
+func ExampleResultAs_failedHandler() {
+	handler := func(ctx durable.Context, _ string) (string, error) {
+		return "", errors.New("card declined")
+	}
+
+	result, err := durabletest.NewLocalRunner(handler).RunUntilComplete("order-42")
+	if err != nil {
+		fmt.Println("Runner error:", err)
+		return
+	}
+	fmt.Println("Status:", result.Status)
+
+	if _, err := durabletest.ResultAs[string](result); err != nil {
+		fmt.Println("Error:", err)
+	}
+
+	// Output:
+	// Status: FAILED
+	// Error: durabletest: cannot deserialize result from FAILED execution: Error: card declined
 }

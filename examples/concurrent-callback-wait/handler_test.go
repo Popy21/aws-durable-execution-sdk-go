@@ -16,7 +16,10 @@ func TestHandler(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The submitter step calls the real Lambda API which fails in local
 	// testing (no real endpoint). The handler fails at the submitter step.

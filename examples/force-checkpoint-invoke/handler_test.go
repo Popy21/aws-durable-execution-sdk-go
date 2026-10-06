@@ -21,7 +21,10 @@ func TestHandler(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, input)
+	result, err := runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Execution suspends because chained invokes need external resolution.
 	if result.Status != durabletest.Pending {
@@ -33,7 +36,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete invoke-1: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting invoke-2), got %s", result.Status)
 	}
@@ -43,7 +49,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete invoke-2: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting invoke-3), got %s", result.Status)
 	}
@@ -53,7 +62,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete invoke-3: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

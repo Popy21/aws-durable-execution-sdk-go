@@ -64,7 +64,7 @@ func TestHandler(t *testing.T) {
 func TestParseHandlerTestUnasserted(t *testing.T) {
 	ht, err := parseSource(t, `
 func run(t *testing.T, event int) *durabletest.TestResult {
-	return durabletest.NewLocalRunner(handler).RunUntilComplete(t, event)
+	return extest.New(t, handler).RunUntilComplete(t, event)
 }
 
 func runAndAssert(t *testing.T, event int) {
@@ -80,7 +80,7 @@ func TestAssertedThroughHelper(t *testing.T) {
 }
 
 func TestDirectGap(t *testing.T) {
-	durabletest.NewLocalRunner(handler).Run(t, 1)
+	extest.New(t, handler).Run(t, 1)
 }
 
 func TestHelperGap(t *testing.T) {
@@ -116,7 +116,7 @@ func TestSubtests(t *testing.T) {
 func TestParseHandlerTestNestedHelpers(t *testing.T) {
 	ht, err := parseSource(t, `
 func runC(t *testing.T, event int) *durabletest.TestResult {
-	return durabletest.NewLocalRunner(handler).RunUntilComplete(t, event)
+	return extest.New(t, handler).RunUntilComplete(t, event)
 }
 
 func runB(t *testing.T, event int) *durabletest.TestResult {
@@ -169,7 +169,7 @@ func TestSubtestThroughChain(t *testing.T) {
 func TestParseHandlerTestSubtestParameterNames(t *testing.T) {
 	ht, err := parseSource(t, `
 func run(t *testing.T, event int) *durabletest.TestResult {
-	return durabletest.NewLocalRunner(handler).RunUntilComplete(t, event)
+	return extest.New(t, handler).RunUntilComplete(t, event)
 }
 
 func TestRenamed(tc *testing.T) {

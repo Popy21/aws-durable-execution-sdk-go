@@ -17,7 +17,10 @@ func TestHandlerPropagatesTimeout(t *testing.T) {
 	t.Setenv("TARGET_FUNCTION_NAME", targetID)
 	runner := durabletest.NewLocalRunner(handler)
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING while the invoke is open", result.Status)
 	}
@@ -25,7 +28,10 @@ func TestHandlerPropagatesTimeout(t *testing.T) {
 		t.Fatalf("TimeoutChainedInvoke: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, "event")
+	result, err = runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED", result.Status)
 	}
@@ -51,7 +57,10 @@ func TestHandlerInvokesTargetFromEnvironment(t *testing.T) {
 		return "target_result", nil
 	}))
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}

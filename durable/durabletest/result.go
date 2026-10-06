@@ -322,14 +322,20 @@ type TestContextDetails struct {
 type TestWaitDetails struct{}
 
 // ResultAs deserializes the raw result of a [Succeeded] [TestResult] into
-// the target type O. It returns an error if the result is not present or
-// deserialization fails.
+// the target type O. It returns an error when the execution did not
+// succeed or deserialization fails. For a [Failed] execution the error
+// message includes the recorded [TestError.Type] and [TestError.Message],
+// so a caller that checks the runner's error and then ResultAs's error
+// learns why the handler failed.
 //
 // ResultAs is a package-level generic function because Go methods cannot
 // have type parameters.
 func ResultAs[O any](r *TestResult) (O, error) {
 	var zero O
 	if r.Status != Succeeded {
+		if r.Status == Failed && r.Error != nil {
+			return zero, fmt.Errorf("durabletest: cannot deserialize result from %s execution: %s: %s", r.Status, r.Error.Type, r.Error.Message)
+		}
 		return zero, fmt.Errorf("durabletest: cannot deserialize result from %s execution", r.Status)
 	}
 	if r.RawResult == "" {

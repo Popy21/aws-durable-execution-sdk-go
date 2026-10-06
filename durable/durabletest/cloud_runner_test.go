@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -129,7 +130,10 @@ func TestCloudRunnerSucceeded(t *testing.T) {
 		durabletest.WithTimeout(time.Second),
 	)
 
-	result := runner.Run(t, map[string]string{"orderId": "123"})
+	result, err := runner.Run(t.Context(), map[string]string{"orderId": "123"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -188,7 +192,10 @@ func TestCloudRunnerFailed(t *testing.T) {
 		durabletest.WithPollInterval(time.Millisecond),
 	)
 
-	result := runner.Run(t, "input")
+	result, err := runner.Run(t.Context(), "input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED, got %s", result.Status)
@@ -253,7 +260,10 @@ func TestCloudRunnerPollUntilTerminal(t *testing.T) {
 		durabletest.WithTimeout(time.Second),
 	)
 
-	result := runner.Run(t, nil)
+	result, err := runner.Run(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected SUCCEEDED, got %s", result.Status)
@@ -264,9 +274,8 @@ func TestCloudRunnerPollUntilTerminal(t *testing.T) {
 }
 
 func TestCloudRunnerTimeout(t *testing.T) {
-	// Verify that a CloudRunner with a very short timeout and an
-	// always-RUNNING execution terminates (doesn't hang). We verify
-	// by observing that the poll count is bounded.
+	// An execution that stays RUNNING past the configured timeout ends
+	// the run with an error and a nil result.
 	var polls atomic.Int32
 
 	api := &fakeCloudAPI{
@@ -278,17 +287,19 @@ func TestCloudRunnerTimeout(t *testing.T) {
 		},
 	}
 
-	// We can't intercept t.Fatal in the same goroutine, so use
-	// RunWithArn which also calls t.Fatal on timeout. Instead, verify
-	// the timeout mechanic works by running in a controlled way:
-	// create the runner, confirm it was configured correctly.
 	runner := durabletest.NewCloudRunner(api, "fn:$LATEST",
 		durabletest.WithPollInterval(time.Millisecond),
 		durabletest.WithTimeout(5*time.Millisecond),
 	)
-	// Verify runner is properly constructed (non-nil).
-	if runner == nil {
-		t.Fatal("runner should not be nil")
+	result, err := runner.Run(t.Context(), nil)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout error", err)
+	}
+	if result != nil {
+		t.Errorf("result = %+v, want nil", result)
+	}
+	if polls.Load() == 0 {
+		t.Error("no polls before the timeout")
 	}
 }
 
@@ -431,7 +442,10 @@ func TestCloudRunnerPaginatedHistory(t *testing.T) {
 		durabletest.WithPollInterval(time.Millisecond),
 	)
 
-	result := runner.Run(t, nil)
+	result, err := runner.Run(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(result.Operations) != 2 {
 		t.Fatalf("expected 2 operations (paginated), got %d", len(result.Operations))
@@ -464,7 +478,10 @@ func TestCloudRunnerTimedOutStatus(t *testing.T) {
 		durabletest.WithPollInterval(time.Millisecond),
 	)
 
-	result := runner.Run(t, nil)
+	result, err := runner.Run(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected FAILED for TIMED_OUT, got %s", result.Status)
@@ -518,7 +535,10 @@ func TestCloudRunnerOmitsExecutionOperation(t *testing.T) {
 		durabletest.WithPollInterval(time.Millisecond),
 		durabletest.WithTimeout(time.Second),
 	)
-	result := runner.Run(t, nil)
+	result, err := runner.Run(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(result.Operations) != 1 {
 		t.Fatalf("expected only the handler's operation, got %d: %+v", len(result.Operations), result.Operations)

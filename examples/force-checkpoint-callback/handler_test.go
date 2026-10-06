@@ -19,7 +19,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Parallel collects branch results without propagating individual
 	// failures. Branch 2's submitter fails (no real endpoint) but the

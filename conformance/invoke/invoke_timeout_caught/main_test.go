@@ -15,7 +15,10 @@ func runUntilInvokeOpen(t *testing.T) *durabletest.LocalRunner[any, string] {
 	t.Helper()
 	t.Setenv("TARGET_FUNCTION_NAME", targetID)
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING while the invoke is open", result.Status)
 	}
@@ -30,7 +33,10 @@ func TestHandlerReturnsFallbackOnTimeout(t *testing.T) {
 		t.Fatalf("TimeoutChainedInvoke: %v", err)
 	}
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED; error = %+v", result.Status, result.Error)
 	}
@@ -55,7 +61,10 @@ func TestHandlerPropagatesOtherFailures(t *testing.T) {
 		t.Fatalf("FailChainedInvoke: %v", err)
 	}
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Failed {
 		t.Fatalf("status = %s, want FAILED", result.Status)
 	}
@@ -73,7 +82,10 @@ func TestHandlerReturnsFallbackOnSuccess(t *testing.T) {
 		t.Fatalf("CompleteChainedInvoke: %v", err)
 	}
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}

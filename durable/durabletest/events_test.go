@@ -50,7 +50,10 @@ func twoWaitHandler(ctx durable.Context, event string) (string, error) {
 // execution needs three invocations to finish.
 func TestEventsAndInvocationsAcrossTwoSuspensions(t *testing.T) {
 	runner := durabletest.NewLocalRunner(twoWaitHandler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("Status = %s, want SUCCEEDED", result.Status)
@@ -134,7 +137,10 @@ func TestEventsAndInvocationsAcrossTwoSuspensions(t *testing.T) {
 func TestEventsAccumulateAcrossRunCalls(t *testing.T) {
 	runner := durabletest.NewLocalRunner(twoWaitHandler)
 
-	r1 := runner.Run(t, "go")
+	r1, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r1.Status != durabletest.Pending {
 		t.Fatalf("first Run Status = %s, want PENDING", r1.Status)
 	}
@@ -146,7 +152,10 @@ func TestEventsAccumulateAcrossRunCalls(t *testing.T) {
 	}
 
 	runner.CompletePendingTimers()
-	r2 := runner.Run(t, "go")
+	r2, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(r2.Invocations) != 2 {
 		t.Fatalf("second Run len(Invocations) = %d, want 2", len(r2.Invocations))
 	}
@@ -174,7 +183,10 @@ func TestInvocationErrorOnFailedExecution(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Failed {
 		t.Fatalf("Status = %s, want FAILED", result.Status)
@@ -219,7 +231,10 @@ func TestCallbackAndInvokeEvents(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("Status = %s, want PENDING on callback", result.Status)
 	}
@@ -230,14 +245,20 @@ func TestCallbackAndInvokeEvents(t *testing.T) {
 	if err := runner.SendCallbackSuccess(cbs[0].CallbackID, "yes"); err != nil {
 		t.Fatal(err)
 	}
-	result = runner.RunUntilComplete(t, "go")
+	result, err = runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("Status = %s, want PENDING on invoke", result.Status)
 	}
 	if err := runner.CompleteChainedInvoke("downstream", "ok"); err != nil {
 		t.Fatal(err)
 	}
-	result = runner.RunUntilComplete(t, "go")
+	result, err = runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("Status = %s, want SUCCEEDED", result.Status)
 	}
@@ -349,7 +370,10 @@ func TestCloudRunnerEventsAndInvocations(t *testing.T) {
 		durabletest.WithPollInterval(time.Millisecond),
 		durabletest.WithTimeout(time.Second),
 	)
-	result := runner.Run(t, "go")
+	result, err := runner.Run(t.Context(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("Status = %s, want SUCCEEDED", result.Status)
@@ -398,7 +422,10 @@ func oversizedResultHandler(ctx durable.Context, _ string) (string, error) {
 // carries the checkpointed result.
 func TestOversizedResultEventOrder(t *testing.T) {
 	runner := durabletest.NewLocalRunner(oversizedResultHandler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("Status = %s, want SUCCEEDED", result.Status)
@@ -437,7 +464,10 @@ func TestOversizedResultPendingRecordsNoTerminalEvent(t *testing.T) {
 	// With no steps, the first checkpoint is the oversized-result one.
 	runner.OmitTokenOnCheckpoint(1)
 
-	result := runner.Run(t, "go")
+	result, err := runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("Status = %s, want PENDING", result.Status)
 	}
@@ -446,7 +476,10 @@ func TestOversizedResultPendingRecordsNoTerminalEvent(t *testing.T) {
 		t.Fatalf("EventTypes() after PENDING =\n  %v\nwant\n  %v", got, wantTypes)
 	}
 
-	result = runner.Run(t, "go")
+	result, err = runner.Run("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("Status = %s, want SUCCEEDED", result.Status)
 	}

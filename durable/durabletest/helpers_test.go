@@ -35,7 +35,10 @@ func TestResetRunsWorkflowFromScratch(t *testing.T) {
 
 	runner := durabletest.NewLocalRunner(handler)
 
-	first := runner.RunUntilComplete(t, "x")
+	first, err := runner.RunUntilComplete("x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Succeeded {
 		t.Fatalf("first run: status = %s, want SUCCEEDED", first.Status)
 	}
@@ -50,7 +53,10 @@ func TestResetRunsWorkflowFromScratch(t *testing.T) {
 	// function runs again and the handler sees the new input.
 	runner.Reset()
 
-	second := runner.RunUntilComplete(t, "y")
+	second, err := runner.RunUntilComplete("y")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second run: status = %s, want SUCCEEDED", second.Status)
 	}
@@ -102,7 +108,10 @@ func TestResetClearsOpenCallbacksAndPreservesConfig(t *testing.T) {
 	serdes := &recordingSerdes{}
 	runner := durabletest.NewLocalRunner(handler, durable.WithSerdes(serdes))
 
-	result := runner.RunUntilComplete(t, "in")
+	result, err := runner.RunUntilComplete("in")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}
@@ -122,7 +131,10 @@ func TestResetClearsOpenCallbacksAndPreservesConfig(t *testing.T) {
 
 	// The handler still runs with the same serdes.
 	before := serdes.calls.Load()
-	result = runner.RunUntilComplete(t, "again")
+	result, err = runner.RunUntilComplete("again")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status after reset = %s, want PENDING", result.Status)
 	}
@@ -135,7 +147,10 @@ func TestResetClearsOpenCallbacksAndPreservesConfig(t *testing.T) {
 	if err := runner.SendCallbackSuccess(runner.OpenCallbacks()[0].CallbackID, "done"); err != nil {
 		t.Fatalf("SendCallbackSuccess: %v", err)
 	}
-	result = runner.RunUntilComplete(t, "again")
+	result, err = runner.RunUntilComplete("again")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("final status = %s, want SUCCEEDED", result.Status)
 	}
@@ -153,14 +168,20 @@ func TestResetPreservesRegisteredFunctions(t *testing.T) {
 		return "echo:" + in, nil
 	}))
 
-	result := runner.RunUntilComplete(t, "one")
+	result, err := runner.RunUntilComplete("one")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got, _ := durabletest.ResultAs[string](result); got != "echo:one" {
 		t.Fatalf("result = %q, want %q", got, "echo:one")
 	}
 
 	runner.Reset()
 
-	result = runner.RunUntilComplete(t, "two")
+	result, err = runner.RunUntilComplete("two")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status after reset = %s, want SUCCEEDED (registered function should still resolve)", result.Status)
 	}
@@ -174,7 +195,10 @@ func TestResetClearsPendingInvokesAndOmitSchedule(t *testing.T) {
 		return durable.Invoke[string](ctx, "call", "unregistered", event)
 	}
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "in")
+	result, err := runner.RunUntilComplete("in")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}
@@ -190,14 +214,20 @@ func TestResetClearsPendingInvokesAndOmitSchedule(t *testing.T) {
 
 	// The omission schedule is gone: the re-run checkpoints normally and
 	// blocks on the new invoke rather than ending early without a token.
-	result = runner.RunUntilComplete(t, "in")
+	result, err = runner.RunUntilComplete("in")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status after reset = %s, want PENDING", result.Status)
 	}
 	if err := runner.CompleteChainedInvoke("call", "ok"); err != nil {
 		t.Fatalf("CompleteChainedInvoke after reset: %v", err)
 	}
-	result = runner.RunUntilComplete(t, "in")
+	result, err = runner.RunUntilComplete("in")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("final status = %s, want SUCCEEDED", result.Status)
 	}
@@ -236,7 +266,10 @@ func TestOperationByNameAndIndex(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}
@@ -414,7 +447,10 @@ func TestFormatTreeLocalNestedRun(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}
@@ -457,7 +493,10 @@ func TestFormatTreeLocalRunTimings(t *testing.T) {
 
 	before := time.Now()
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING (blocked on callback)", result.Status)
 	}
@@ -468,7 +507,10 @@ func TestFormatTreeLocalRunTimings(t *testing.T) {
 	if err := runner.SendCallbackSuccess(cbs[0].CallbackID, "!"); err != nil {
 		t.Fatalf("SendCallbackSuccess: %v", err)
 	}
-	result = runner.RunUntilComplete(t, "go")
+	result, err = runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}
@@ -546,7 +588,10 @@ func TestFormatTreeLocalRunUnsettledOperationHasNoEnd(t *testing.T) {
 		return cb.Result()
 	}
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "go")
+	result, err := runner.RunUntilComplete("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}

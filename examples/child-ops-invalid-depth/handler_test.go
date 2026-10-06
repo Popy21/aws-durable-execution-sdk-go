@@ -12,7 +12,10 @@ import (
 
 func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The handler panics in the child context step; panics are caught by
 	// the SDK and surface as a FAILED execution.

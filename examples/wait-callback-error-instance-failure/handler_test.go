@@ -19,7 +19,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The handler captures the callback error into cbErr and continues.
 	// Even though the submitter fails (no real AWS endpoint), the handler

@@ -78,7 +78,7 @@ func (m SignatureMode) String() string {
 // file instead of comparing. In [Subset] mode the written file lists
 // every operation the run produced; delete the optional ones before
 // committing it, because a later run that lacks them would fail.
-func AssertSignature(t *testing.T, result *durabletest.TestResult, mode SignatureMode) {
+func AssertSignature(t testing.TB, result *durabletest.TestResult, mode SignatureMode) {
 	t.Helper()
 	AssertSignatureFile(t, result, mode, GoldenPath)
 }
@@ -90,7 +90,7 @@ func AssertSignature(t *testing.T, result *durabletest.TestResult, mode Signatur
 // whose deployed run differs from its local run by design keeps the
 // cloud sequence in [CloudGoldenPath] and selects it by [Runner.Cloud].
 // Every file is regenerated the same way, with UPDATE_GOLDEN=1.
-func AssertSignatureFile(t *testing.T, result *durabletest.TestResult, mode SignatureMode, path string) {
+func AssertSignatureFile(t testing.TB, result *durabletest.TestResult, mode SignatureMode, path string) {
 	t.Helper()
 	path = filepath.FromSlash(path)
 	actual := durabletest.EventSignature(result)
@@ -127,7 +127,7 @@ func AssertSignatureFile(t *testing.T, result *durabletest.TestResult, mode Sign
 // A cloud golden that the deployed run makes redundant is reported as
 // an error, so a difference that no longer exists cannot stay
 // documented.
-func AssertCloudSignature(t *testing.T, result *durabletest.TestResult, mode SignatureMode, dir string) {
+func AssertCloudSignature(t testing.TB, result *durabletest.TestResult, mode SignatureMode, dir string) {
 	t.Helper()
 	localPath := filepath.Join(dir, filepath.FromSlash(GoldenPath))
 	cloudPath := filepath.Join(dir, filepath.FromSlash(CloudGoldenPath))
@@ -230,7 +230,7 @@ func missing(required, actual []durabletest.OperationSignature) error {
 	return nil
 }
 
-func writeGolden(t *testing.T, path string, sigs []durabletest.OperationSignature) {
+func writeGolden(t testing.TB, path string, sigs []durabletest.OperationSignature) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("creating golden file directory: %v", err)

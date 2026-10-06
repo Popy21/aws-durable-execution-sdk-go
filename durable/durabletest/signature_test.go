@@ -28,7 +28,10 @@ func TestSignatureStepSuccess(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	durabletest.AssertGoldenSignature(t, result, goldenPath("step_success"))
 }
@@ -50,7 +53,10 @@ func TestSignatureStepRetry(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	durabletest.AssertGoldenSignature(t, result, goldenPath("step_retry"))
 }
@@ -76,7 +82,10 @@ func TestSignatureWait(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	durabletest.AssertGoldenSignature(t, result, goldenPath("wait"))
 }
@@ -95,7 +104,10 @@ func TestSignatureCallback(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Callback leaves execution PENDING.
 	if result.Status != durabletest.Pending {
@@ -111,7 +123,10 @@ func TestSignatureCallback(t *testing.T) {
 		t.Fatalf("send callback: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, "input")
+	result, err = runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 	durabletest.AssertGoldenSignature(t, result, goldenPath("callback"))
 }
 
@@ -125,7 +140,10 @@ func TestSignatureChainedInvoke(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "hello")
+	result, err := runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Chained invoke leaves execution PENDING.
 	if result.Status != durabletest.Pending {
@@ -137,7 +155,10 @@ func TestSignatureChainedInvoke(t *testing.T) {
 		t.Fatalf("complete invoke: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, "hello")
+	result, err = runner.RunUntilComplete("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	durabletest.AssertGoldenSignature(t, result, goldenPath("chained_invoke"))
 }
 
@@ -163,7 +184,10 @@ func TestSignatureParallel(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, "input")
+	result, err := runner.RunUntilComplete("input")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	durabletest.AssertGoldenSignature(t, result, goldenPath("parallel"))
 }
@@ -183,7 +207,10 @@ func TestSignatureMap(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, []int{1, 2, 3})
+	result, err := runner.RunUntilComplete([]int{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	durabletest.AssertGoldenSignature(t, result, goldenPath("map"))
 }

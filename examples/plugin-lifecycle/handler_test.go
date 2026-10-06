@@ -17,7 +17,10 @@ func TestHandler(t *testing.T) {
 	rec = &recorder{}
 
 	runner := durabletest.NewLocalRunner(handler, durable.WithPlugins(plugin))
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)

@@ -12,7 +12,10 @@ import (
 
 func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Execution suspends because the callback awaits external resolution.
 	if result.Status != durabletest.Pending {
@@ -28,7 +31,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("timeout callback: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, nil)
+	result, err = runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

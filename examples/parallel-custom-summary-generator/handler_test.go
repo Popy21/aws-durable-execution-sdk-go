@@ -34,7 +34,10 @@ func TestHandler(t *testing.T) {
 	// limit, so the batch is checkpointed as a record carrying the custom
 	// summary. The full results still reach the caller.
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, Event{})
+	result, err := runner.RunUntilComplete(Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}
@@ -75,7 +78,10 @@ func TestHandlerSmallPayload(t *testing.T) {
 	// A small payload stays within one checkpoint: the full result is
 	// stored and no summary is produced.
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, Event{BranchPayloadSize: 10})
+	result, err := runner.RunUntilComplete(Event{BranchPayloadSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

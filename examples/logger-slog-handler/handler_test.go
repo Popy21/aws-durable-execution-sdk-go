@@ -36,7 +36,10 @@ func (b *lockedBuffer) String() string {
 func TestHandler(t *testing.T) {
 	var out lockedBuffer
 	runner := durabletest.NewLocalRunner(handler, durable.WithLogHandler(newHandler(&out)))
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)

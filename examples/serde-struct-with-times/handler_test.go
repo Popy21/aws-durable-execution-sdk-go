@@ -28,7 +28,10 @@ func stepPayload(t *testing.T, result *durabletest.TestResult, name string) stri
 
 func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, event{Title: "Durable Functions 101"})
+	result, err := runner.RunUntilComplete(event{Title: "Durable Functions 101"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s (%v)", result.Status, result.Error)

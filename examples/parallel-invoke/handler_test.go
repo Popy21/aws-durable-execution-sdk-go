@@ -16,7 +16,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("FUNCTION_NAME_PREFIX", "v2-")
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, Input{})
+	result, err := runner.RunUntilComplete(Input{})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Execution suspends because invokes need external resolution.
 	if result.Status != durabletest.Pending {
@@ -31,7 +34,10 @@ func TestHandler(t *testing.T) {
 			// Ignore errors — some invokes may not yet be registered.
 			_ = runner.CompleteChainedInvoke(name, json.RawMessage(`{"ok":true}`))
 		}
-		result = runner.RunUntilComplete(t, Input{})
+		result, err = runner.RunUntilComplete(Input{})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if result.Status == durabletest.Succeeded {
 			break
 		}

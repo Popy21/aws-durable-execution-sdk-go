@@ -19,7 +19,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// First callback (timeout-test) suspends waiting for external resolution.
 	if result.Status != durabletest.Pending {
@@ -35,7 +38,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("timeout callback: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, nil)
+	result, err = runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// After timeout, the handler creates the failure-test callback then its
 	// "send-failure" Step calls the real Lambda API which is unavailable

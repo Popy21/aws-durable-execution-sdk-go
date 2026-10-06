@@ -140,6 +140,47 @@ func (r *recordingTB) Fatalf(format string, args ...any) {
 	panic(stop{})
 }
 
+func (r *recordingTB) Fatal(args ...any) {
+	r.fatal = fmt.Sprint(args...)
+	panic(stop{})
+}
+
+// fatalOf runs call and returns the message it failed tb with, or "" when
+// it did not fail.
+func fatalOf(tb *recordingTB, call func()) string {
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if _, ok := rec.(stop); !ok {
+					panic(rec)
+				}
+			}
+		}()
+		call()
+	}()
+	return tb.fatal
+}
+
+// TestRunnerErrorFailsTest checks that a runner error, here an event that
+// does not marshal to JSON, fails the test through the testing.TB passed
+// to Run and RunUntilComplete.
+func TestRunnerErrorFailsTest(t *testing.T) {
+	handler := func(_ durable.Context, _ chan int) (string, error) { return "", nil }
+	t.Setenv(EnvRunner, "")
+	for name, call := range map[string]func(*Runner[chan int, string], testing.TB){
+		"Run":              func(r *Runner[chan int, string], tb testing.TB) { r.Run(tb, make(chan int)) },
+		"RunUntilComplete": func(r *Runner[chan int, string], tb testing.TB) { r.RunUntilComplete(tb, make(chan int)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tb := &recordingTB{TB: t}
+			r := New(t, handler)
+			if got := fatalOf(tb, func() { call(r, tb) }); !strings.Contains(got, "marshal event") {
+				t.Fatalf("%s: fatal = %q, want the runner's marshal error", name, got)
+			}
+		})
+	}
+}
+
 func TestCloudRefusesLocalOnlyMethods(t *testing.T) {
 	calls := map[string]func(r *Runner[string, string]){
 		"CompleteChainedInvoke": func(r *Runner[string, string]) { _ = r.CompleteChainedInvoke("n", nil) },

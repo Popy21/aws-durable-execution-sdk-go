@@ -60,7 +60,10 @@ func oneStep(ctx durable.Context, _ any) (string, error) {
 
 func runLocal(t *testing.T, h durable.Handler[any, string]) *durabletest.TestResult {
 	t.Helper()
-	result := durabletest.NewLocalRunner(h).RunUntilComplete(t, nil)
+	result, err := durabletest.NewLocalRunner(h).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

@@ -21,7 +21,10 @@ func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// First run: Step fails synchronously (caught), Invoke suspends.
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting invoke), got %s", result.Status)
 	}
@@ -34,7 +37,10 @@ func TestHandler(t *testing.T) {
 	// Second run: replays past Step and Invoke failures (caught),
 	// CreateCallback creates callback, send-callback-failure Step fails
 	// (no real endpoint, error discarded), cb.Result() suspends.
-	result = runner.RunUntilComplete(t, nil)
+	result, err = runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting callback), got %s", result.Status)
 	}
@@ -50,7 +56,10 @@ func TestHandler(t *testing.T) {
 
 	// Third run: callback resolves with CallbackError (caught), handler
 	// returns Output with all three error types matched.
-	result = runner.RunUntilComplete(t, nil)
+	result, err = runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

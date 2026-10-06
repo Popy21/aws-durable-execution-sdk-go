@@ -32,7 +32,10 @@ func TestOrphanGoBranchDoesNotOutliveSuccessfulInvocation(t *testing.T) {
 		return "handler-done", nil
 	}
 	r := durabletest.NewLocalRunner(h)
-	res := r.Run(t, nil)
+	res, err := r.Run(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", res.Status)
 	}
@@ -77,7 +80,10 @@ func TestOrphanGoBranchDoesNotOutliveFailedInvocation(t *testing.T) {
 				return finish()
 			}
 			r := durabletest.NewLocalRunner(h)
-			res := r.Run(t, nil)
+			res, err := r.Run(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if res.Status != durabletest.Failed {
 				t.Fatalf("status = %s, want FAILED", res.Status)
 			}

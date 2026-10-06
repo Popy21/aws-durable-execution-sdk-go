@@ -53,14 +53,20 @@ func observe(err error) errorObservation {
 func runTwice[I, O any](t *testing.T, handler durable.Handler[I, O], event I, observations *[]errorObservation) {
 	t.Helper()
 	runner := durabletest.NewLocalRunner(handler)
-	first := runner.Run(t, event)
+	first, err := runner.Run(event)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if first.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING (suspended on wait); error = %+v", first.Status, first.Error)
 	}
 	if !runner.CompletePendingTimers() {
 		t.Fatal("no pending wait to complete")
 	}
-	second := runner.Run(t, event)
+	second, err := runner.Run(event)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if second.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", second.Status, second.Error)
 	}
@@ -166,7 +172,9 @@ func TestCallbackTimedOutSentinelOnLiveAndReplay(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	if r := runner.Run(t, ""); r.Status != durabletest.Pending {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING", r.Status)
 	}
 	open := runner.OpenCallbacks()
@@ -176,11 +184,15 @@ func TestCallbackTimedOutSentinelOnLiveAndReplay(t *testing.T) {
 	if err := runner.TimeoutCallback(open[0].CallbackID); err != nil {
 		t.Fatal(err)
 	}
-	if r := runner.Run(t, ""); r.Status != durabletest.Pending {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("second invocation status = %s, want PENDING (suspended on wait)", r.Status)
 	}
 	runner.CompletePendingTimers()
-	if r := runner.Run(t, ""); r.Status != durabletest.Succeeded {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Succeeded {
 		t.Fatalf("third invocation status = %s, want SUCCEEDED; error = %+v", r.Status, r.Error)
 	}
 	if len(observations) != 2 {
@@ -233,11 +245,15 @@ func TestErrorDataRoundTripThroughStepAndChildContext(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	if r := runner.Run(t, ""); r.Status != durabletest.Pending {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", r.Status, r.Error)
 	}
 	runner.CompletePendingTimers()
-	if r := runner.Run(t, ""); r.Status != durabletest.Succeeded {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", r.Status, r.Error)
 	}
 	if len(stepObs) != 2 || len(childObs) != 2 {
@@ -297,11 +313,15 @@ func TestWaitForCallbackSubmitterErrorOnLiveAndReplay(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	if r := runner.Run(t, ""); r.Status != durabletest.Pending {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Pending {
 		t.Fatalf("first invocation status = %s, want PENDING; error = %+v", r.Status, r.Error)
 	}
 	runner.CompletePendingTimers()
-	if r := runner.Run(t, ""); r.Status != durabletest.Succeeded {
+	if r, err := runner.Run(""); err != nil {
+		t.Fatal(err)
+	} else if r.Status != durabletest.Succeeded {
 		t.Fatalf("second invocation status = %s, want SUCCEEDED; error = %+v", r.Status, r.Error)
 	}
 	if len(observations) != 2 {

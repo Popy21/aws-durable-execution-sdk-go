@@ -39,7 +39,10 @@ func TestOmitTokenOnCheckpointEndsInvocationPending(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.OmitTokenOnCheckpoint(1)
 
-	result := runner.RunUntilComplete(t, "!")
+	result, err := runner.RunUntilComplete("!")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}
@@ -59,7 +62,10 @@ func TestOmitTokenOnCheckpointEndsInvocationPending(t *testing.T) {
 		t.Errorf("second step ran %d times before resumption, want 0", got)
 	}
 
-	result = runner.RunUntilComplete(t, "!")
+	result, err = runner.RunUntilComplete("!")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}
@@ -100,7 +106,10 @@ func TestOmitTokenOnCheckpointTargetsNthCall(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 	runner.OmitTokenOnCheckpoint(2)
 
-	result := runner.Run(t, "")
+	result, err := runner.Run("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("status = %s, want PENDING", result.Status)
 	}
@@ -111,7 +120,10 @@ func TestOmitTokenOnCheckpointTargetsNthCall(t *testing.T) {
 		t.Errorf("second = %+v, want not recorded", op)
 	}
 
-	result = runner.RunUntilComplete(t, "")
+	result, err = runner.RunUntilComplete("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
 	}

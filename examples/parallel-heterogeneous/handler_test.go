@@ -16,7 +16,10 @@ func TestHandler(t *testing.T) {
 	runner := durabletest.NewLocalRunner(handler)
 
 	// First run: Step and Wait complete locally; Invoke suspends.
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting invoke), got %s", result.Status)
 	}
@@ -27,7 +30,10 @@ func TestHandler(t *testing.T) {
 	}
 
 	// Second run: all branches resolved.
-	result = runner.RunUntilComplete(t, nil)
+	result, err = runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

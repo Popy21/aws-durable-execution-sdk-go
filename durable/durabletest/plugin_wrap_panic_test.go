@@ -35,7 +35,10 @@ func TestWrapPanicAfterCallDoubleExecutesStepBody(t *testing.T) {
 		}
 		return atomic.LoadInt32(&stepRuns), nil
 	}
-	res := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(t, nil)
+	res, err := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Logf("status=%v result=%s stepRuns=%d", res.Status, res.RawResult, stepRuns)
 	if stepRuns != 1 {
 		t.Errorf("step body executed %d times in one attempt; want 1", stepRuns)
@@ -61,7 +64,10 @@ func TestWrapPanicBeforeCallRunsStepBodyOnce(t *testing.T) {
 			return "step-result", nil
 		})
 	}
-	res := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(t, nil)
+	res, err := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", res.Status)
 	}
@@ -92,7 +98,10 @@ func TestWrapChildContextPanicAfterCallRunsBodyOnce(t *testing.T) {
 			return "child-result", nil
 		})
 	}
-	res := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(t, nil)
+	res, err := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", res.Status)
 	}
@@ -123,7 +132,10 @@ func TestWrapInvocationPanicAfterCallRunsHandlerOnce(t *testing.T) {
 			return "handler-result", nil
 		})
 	}
-	res := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(t, nil)
+	res, err := durabletest.NewLocalRunner(h, durable.WithPlugins(p)).RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED", res.Status)
 	}

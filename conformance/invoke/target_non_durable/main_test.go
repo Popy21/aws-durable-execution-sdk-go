@@ -28,7 +28,10 @@ func TestHandlerAsInvokeTarget(t *testing.T) {
 	runner := durabletest.NewLocalRunner(caller)
 	runner.RegisterFunction("plain-target", durabletest.PlainFunction(handler))
 
-	result := runner.RunUntilComplete(t, "event")
+	result, err := runner.RunUntilComplete("event")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("status = %s, want SUCCEEDED; error = %+v", result.Status, result.Error)
 	}

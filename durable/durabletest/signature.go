@@ -69,7 +69,7 @@ func EventSignature(result *TestResult) []OperationSignature {
 //	UPDATE_GOLDEN=1 go test ./durable/durabletest/ -run TestMyScenario
 //
 // This follows the standard Go testdata golden-file convention.
-func AssertGoldenSignature(t *testing.T, result *TestResult, goldenPath string) {
+func AssertGoldenSignature(t testing.TB, result *TestResult, goldenPath string) {
 	t.Helper()
 
 	actual := EventSignature(result)
@@ -107,7 +107,7 @@ func AssertGoldenSignature(t *testing.T, result *TestResult, goldenPath string) 
 // Like [AssertGoldenSignature], setting UPDATE_GOLDEN=1 regenerates the
 // golden file. The golden file format is identical (a JSON array of
 // [OperationSignature]); only the comparison semantics differ.
-func AssertGoldenSignatureUnordered(t *testing.T, result *TestResult, goldenPath string) {
+func AssertGoldenSignatureUnordered(t testing.TB, result *TestResult, goldenPath string) {
 	t.Helper()
 
 	actual := EventSignature(result)
@@ -141,7 +141,7 @@ func AssertGoldenSignatureUnordered(t *testing.T, result *TestResult, goldenPath
 //
 // Each required signature must appear at least once in the actual
 // signature. Duplicate required entries require multiple actual matches.
-func AssertSignatureContains(t *testing.T, result *TestResult, required []OperationSignature) {
+func AssertSignatureContains(t testing.TB, result *TestResult, required []OperationSignature) {
 	t.Helper()
 
 	actual := EventSignature(result)
@@ -166,7 +166,7 @@ func AssertSignatureContains(t *testing.T, result *TestResult, required []Operat
 // AssertSignatureExcludes verifies that none of the excluded operations
 // appear in the event signature. Use alongside [AssertSignatureContains]
 // when specific operations must NOT be present.
-func AssertSignatureExcludes(t *testing.T, result *TestResult, excluded []OperationSignature) {
+func AssertSignatureExcludes(t testing.TB, result *TestResult, excluded []OperationSignature) {
 	t.Helper()
 
 	actual := EventSignature(result)
@@ -227,7 +227,7 @@ func readGolden(path string) ([]OperationSignature, error) {
 	return sigs, nil
 }
 
-func writeGolden(t *testing.T, path string, sigs []OperationSignature) {
+func writeGolden(t testing.TB, path string, sigs []OperationSignature) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("creating golden file directory: %v", err)

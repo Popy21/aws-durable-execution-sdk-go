@@ -15,7 +15,10 @@ func TestHandler(t *testing.T) {
 	input := TargetInput{Attempt: 3, FailUntilAttempt: 3}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, input)
+	result, err := runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
@@ -40,7 +43,10 @@ func TestHandler_Failure(t *testing.T) {
 	input := TargetInput{Attempt: 1, FailUntilAttempt: 3}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, input)
+	result, err := runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if result.Status != durabletest.Failed {
 		t.Fatalf("expected Failed, got %s", result.Status)

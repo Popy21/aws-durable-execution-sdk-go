@@ -18,7 +18,10 @@ func TestHandler(t *testing.T) {
 	}
 
 	runner := durabletest.NewLocalRunner(handler)
-	result := runner.RunUntilComplete(t, input)
+	result, err := runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Execution suspends because chained invokes need external resolution.
 	if result.Status != durabletest.Pending {
@@ -31,7 +34,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete chain-validate: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting chain-process), got %s", result.Status)
 	}
@@ -42,7 +48,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete chain-process: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting chain-confirm), got %s", result.Status)
 	}
@@ -53,7 +62,10 @@ func TestHandler(t *testing.T) {
 		t.Fatalf("complete chain-confirm: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, input)
+	result, err = runner.RunUntilComplete(input)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}

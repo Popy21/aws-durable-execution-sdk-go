@@ -19,7 +19,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	runner := durabletest.NewLocalRunner(handler)
-	res := runner.RunUntilComplete(t, nil)
+	res, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The handler's submitter calls the real Lambda API
 	// (SendDurableExecutionCallbackSuccess) which is unavailable in local

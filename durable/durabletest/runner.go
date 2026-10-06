@@ -6,7 +6,6 @@ package durabletest
 import (
 	"encoding/json"
 	"fmt"
-	"testing"
 
 	"github.com/aws/aws-durable-execution-sdk-go/durable"
 	"github.com/aws/aws-durable-execution-sdk-go/durable/internal/wire"
@@ -38,7 +37,10 @@ func WithMaxInvocations(n int) RunnerOption {
 // a terminal status (SUCCEEDED or FAILED) or until it is blocked awaiting
 // external resolution (callbacks, chained invokes).
 //
-// LocalRunner is safe for sequential use from a single test goroutine.
+// LocalRunner does not depend on the testing package, so a plain main
+// program can drive a handler with it as well as a test can.
+//
+// LocalRunner is safe for sequential use from a single goroutine.
 // It is NOT safe for concurrent use from multiple goroutines.
 type LocalRunner[I, O any] struct {
 	exec   *localExecution
@@ -140,31 +142,24 @@ func (r *LocalRunner[I, O]) Reset() {
 // for up to the invocation cap ([DefaultMaxInvocations]) within one Run; if
 // it exhausts the cap without settling, [TestResult.CapReached] is true.
 //
-// Run calls t.Fatal on infrastructure errors (payload marshaling, handler
-// invocation errors that indicate a bug rather than a user-handler
-// failure). User-handler errors are reflected in [TestResult.Status] as
-// [Failed], not as test failures.
-func (r *LocalRunner[I, O]) Run(t *testing.T, event I) *TestResult {
-	t.Helper()
-
+// The returned error is non-nil only when the runner itself fails: the
+// event does not marshal to JSON, the invocation returns an error that
+// indicates an SDK or runner bug, or the response does not parse. The
+// result is then nil. The outcome of the handler is never an error: a
+// handler that returns an error produces a [Failed] result with the
+// recorded error in [TestResult.Error], and an invocation that suspends
+// produces a [Pending] result.
+func (r *LocalRunner[I, O]) Run(event I) (*TestResult, error) {
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
-		t.Fatalf("durabletest: marshal event: %v", err)
+		return nil, fmt.Errorf("durabletest: marshal event: %w", err)
 	}
 
 	outcome, err := r.exec.invoke(eventJSON, r.cfg.maxInvocations)
 	if err != nil {
-		t.Fatalf("durabletest: %v", err)
+		return nil, fmt.Errorf("durabletest: %w", err)
 	}
-
-	ops := r.client.allOperations()
-	result, err := testResultFromResponse(outcome.response, ops)
-	if err != nil {
-		t.Fatalf("durabletest: parse response: %v", err)
-	}
-	result.CapReached = outcome.capReached
-	result.attachEvents(r.client.allEvents())
-	return result
+	return r.result(outcome.response, outcome.capReached)
 }
 
 // RunUntilComplete performs repeated invocations until the execution
@@ -185,11 +180,12 @@ func (r *LocalRunner[I, O]) Run(t *testing.T, event I) *TestResult {
 // durable target. If the cap is exhausted, the final result (typically
 // PENDING) is returned with [TestResult.CapReached] set to true.
 //
-// Run calls t.Fatal on infrastructure errors. User-handler errors surface
-// as a FAILED [TestResult].
-func (r *LocalRunner[I, O]) RunUntilComplete(t *testing.T, event I, opts ...RunnerOption) *TestResult {
-	t.Helper()
-
+// The error contract is the one [LocalRunner.Run] states: the error is
+// non-nil, and the result nil, only when the runner itself fails. A
+// failed handler, a run blocked on a callback or invoke, and a run that
+// reaches the invocation cap all return a nil error and a result whose
+// [TestResult.Status] and [TestResult.CapReached] describe the outcome.
+func (r *LocalRunner[I, O]) RunUntilComplete(event I, opts ...RunnerOption) (*TestResult, error) {
 	cfg := r.cfg
 	for _, o := range opts {
 		o(&cfg)
@@ -197,22 +193,27 @@ func (r *LocalRunner[I, O]) RunUntilComplete(t *testing.T, event I, opts ...Runn
 
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
-		t.Fatalf("durabletest: marshal event: %v", err)
+		return nil, fmt.Errorf("durabletest: marshal event: %w", err)
 	}
 
 	response, capReached, err := r.exec.driveUntilSettled(eventJSON, cfg.maxInvocations)
 	if err != nil {
-		t.Fatalf("durabletest: %v", err)
+		return nil, fmt.Errorf("durabletest: %w", err)
 	}
+	return r.result(response, capReached)
+}
 
+// result builds the TestResult for the invocation response from the
+// runner's recorded operations and events.
+func (r *LocalRunner[I, O]) result(response []byte, capReached bool) (*TestResult, error) {
 	ops := r.client.allOperations()
 	result, err := testResultFromResponse(response, ops)
 	if err != nil {
-		t.Fatalf("durabletest: parse response: %v", err)
+		return nil, err
 	}
 	result.CapReached = capReached
 	result.attachEvents(r.client.allEvents())
-	return result
+	return result, nil
 }
 
 // CompletePendingTimers completes every operation that is blocked on a
@@ -362,8 +363,8 @@ func (r *LocalRunner[I, O]) TimeoutChainedInvoke(name string) error {
 // handler tolerates an invocation ending mid-flight:
 //
 //	runner.OmitTokenOnCheckpoint(1)
-//	result := runner.RunUntilComplete(t, input) // PENDING after the first checkpoint
-//	result = runner.RunUntilComplete(t, input)  // resumes from the recorded state
+//	result, err := runner.RunUntilComplete(input) // PENDING after the first checkpoint
+//	result, err = runner.RunUntilComplete(input)  // resumes from the recorded state
 //
 // Count calls, not operations: a step checkpoints twice, once when it
 // starts and once when it settles, so OmitTokenOnCheckpoint(2) withholds

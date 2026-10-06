@@ -21,7 +21,10 @@ func TestHandler(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	runner := durabletest.NewLocalRunner(handler, durable.WithCallbackDeserializer(uppercaseDeserializer{}))
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The handler's submitter calls the real Lambda API
 	// (SendDurableExecutionCallbackSuccess) which is unavailable in local
@@ -49,7 +52,10 @@ func TestDeserializerTransformation(t *testing.T) {
 	runner := durabletest.NewLocalRunner(verificationHandler,
 		durable.WithCallbackDeserializer(uppercaseDeserializer{}))
 
-	result := runner.RunUntilComplete(t, nil)
+	result, err := runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Pending {
 		t.Fatalf("expected Pending (awaiting callback), got %s", result.Status)
 	}
@@ -64,7 +70,10 @@ func TestDeserializerTransformation(t *testing.T) {
 		t.Fatalf("SendCallbackSuccess: %v", err)
 	}
 
-	result = runner.RunUntilComplete(t, nil)
+	result, err = runner.RunUntilComplete(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("expected Succeeded, got %s", result.Status)
 	}
