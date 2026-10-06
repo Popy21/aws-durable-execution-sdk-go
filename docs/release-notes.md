@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed: a suspending invocation no longer responds SUCCEEDED
+
+When an invocation starts to suspend, the SDK returns the suspension
+error from every blocked operation and from `Future.Result`. Before this
+fix, a handler that discarded that error and returned could make the
+invocation respond `SUCCEEDED` while an operation it started, such as a
+callback, was still pending. The invocation now responds `PENDING`.
+
 ### Fixed: checkpoint failures are classified by one table, and a rejected checkpoint fails the execution
 
 A failed checkpoint or state-load call is now classified by these rules,

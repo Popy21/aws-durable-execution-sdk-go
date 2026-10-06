@@ -621,3 +621,33 @@ func TestRetireCommitmentCascadesThroughHandleChain(t *testing.T) {
 		t.Fatalf("late commitment against a retired subtree recorded %d", n)
 	}
 }
+
+// settleProbe is a futureSettler that records what fired reports at the
+// moment fire settles it.
+type settleProbe struct {
+	s        *suspendSignal
+	observed chan bool
+}
+
+func (p *settleProbe) settleWithSuspend() {
+	p.observed <- p.s.fired()
+}
+
+// TestFiredBeforeFireReleasesGoroutines verifies that fired reports true
+// before fire settles any future. A goroutine that fire releases can return
+// from the handler at once. The handler then decides between PENDING and
+// SUCCEEDED by calling fired, so fired must already report true.
+func TestFiredBeforeFireReleasesGoroutines(t *testing.T) {
+	s := newSuspendSignal()
+	probe := &settleProbe{s: s, observed: make(chan bool, 1)}
+	s.futures = append(s.futures, probe)
+
+	s.fire()
+
+	if !<-probe.observed {
+		t.Fatal("fired() = false while fire was settling a future, want true")
+	}
+	if !s.fired() {
+		t.Fatal("fired() = false after fire returned, want true")
+	}
+}

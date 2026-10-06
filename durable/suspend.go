@@ -51,9 +51,9 @@ import (
 //
 // Once fired, the invocation MUST return PENDING regardless of what user
 // code does. This prevents user code from swallowing errSuspendExecution
-// and returning a bogus success. The fired() predicate is true once the
-// signal has fired. User-facing code paths (the handler select,
-// claimOperation) use it to detect suspension.
+// and returning a bogus success. The fired() predicate is true from the
+// moment fire starts, before fire releases any goroutine. User-facing code
+// paths (the handler outcome, claimOperation) use it to detect suspension.
 type suspendSignal struct {
 	once sync.Once
 	ch   chan struct{}
@@ -250,8 +250,9 @@ func newSuspendSignal() *suspendSignal {
 // below. A future registered after it observes firing and is settled by
 // registerFuture. So every registered future is settled exactly once
 // whatever the interleaving. ch is closed last, after the drained set has
-// settled, so done and fired report suspension only once every future
-// registered before fire has unwound.
+// settled, so done reports suspension only once every future registered
+// before fire has unwound. fired reports it from the moment fire sets
+// firing; see fired.
 func (s *suspendSignal) fire() {
 	s.once.Do(func() {
 		s.mu.Lock()
@@ -279,19 +280,25 @@ func (s *suspendSignal) fire() {
 	})
 }
 
-// done returns a channel closed once the signal has fired.
+// done returns a channel that fire closes after it has settled every future
+// registered before it. fired reports suspension earlier, from the moment
+// fire starts.
 func (s *suspendSignal) done() <-chan struct{} {
 	return s.ch
 }
 
-// fired reports whether the signal has fired (all branches exhausted).
+// fired reports whether fire has started. It reads firing under mu instead
+// of testing ch. fire sets firing before it wakes any parked goroutine or
+// settles any future, and it closes ch only after it has settled them. A
+// goroutine that fire releases can return from user code before ch is
+// closed. If fired tested ch, a caller that runs after that return could
+// see false, and the handler would respond SUCCEEDED for an invocation that
+// is suspending. Reading firing reports true to every goroutine that fire
+// has released.
 func (s *suspendSignal) fired() bool {
-	select {
-	case <-s.ch:
-		return true
-	default:
-		return false
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.firing
 }
 
 // committed reports whether the invocation is committed to PENDING: a
