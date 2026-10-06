@@ -292,8 +292,9 @@ func TestActiveBranchDoubleDeregisterSafe(t *testing.T) {
 // pending flag lands on the operation's own branch, not the caller's
 // context: a subsequent operation on the caller's context still claims and
 // checkpoints. The seeded operation makes the async op pending on the first
-// invocation, so the test waits on the future (deterministic, no sleep) and
-// only then runs the follow-up operation on the caller.
+// invocation. The follow-up operation runs on the caller while the async
+// op waits on its own goroutine; awaiting the future afterwards ends the
+// invocation, since nothing else can make progress.
 func TestAsyncOperationDoesNotBlockCaller(t *testing.T) {
 	// afterCheckpointed reports whether a live step named "after" recorded
 	// both its START and SUCCEED updates.
@@ -327,11 +328,11 @@ func TestAsyncOperationDoesNotBlockCaller(t *testing.T) {
 			stepPayload(`""`, wireOperation{Id: hashID("1"), Status: "STARTED"}),
 			func(ctx Context, _ string) (string, error) {
 				fut := WaitAsync(ctx, "wa", time.Second)
-				if _, err := fut.Result(); !errors.Is(err, errSuspendExecution) {
-					return "", errors.New("async wait did not become pending")
-				}
 				if err := runAfterStep(ctx); err != nil {
 					return "", err
+				}
+				if _, err := fut.Result(); !errors.Is(err, errSuspendExecution) {
+					return "", errors.New("async wait did not become pending")
 				}
 				return "", errSuspendExecution
 			})
@@ -351,11 +352,11 @@ func TestAsyncOperationDoesNotBlockCaller(t *testing.T) {
 				fut := StepAsync(ctx, "sa", func(StepContext) (string, error) {
 					return "unreached", nil
 				})
-				if _, err := fut.Result(); !errors.Is(err, errSuspendExecution) {
-					return "", errors.New("async step did not become pending")
-				}
 				if err := runAfterStep(ctx); err != nil {
 					return "", err
+				}
+				if _, err := fut.Result(); !errors.Is(err, errSuspendExecution) {
+					return "", errors.New("async step did not become pending")
 				}
 				return "", errSuspendExecution
 			})
@@ -373,11 +374,11 @@ func TestAsyncOperationDoesNotBlockCaller(t *testing.T) {
 			stepPayload(`""`, wireOperation{Id: hashID("1"), Status: "STARTED"}),
 			func(ctx Context, _ string) (string, error) {
 				fut := InvokeAsync[string](ctx, "ia", "arn:target", "x")
-				if _, err := fut.Result(); !errors.Is(err, errSuspendExecution) {
-					return "", errors.New("async invoke did not become pending")
-				}
 				if err := runAfterStep(ctx); err != nil {
 					return "", err
+				}
+				if _, err := fut.Result(); !errors.Is(err, errSuspendExecution) {
+					return "", errors.New("async invoke did not become pending")
 				}
 				return "", errSuspendExecution
 			})
@@ -395,9 +396,10 @@ func TestAsyncOperationDoesNotBlockCaller(t *testing.T) {
 // non-durable work has its subsequent checkpoint refused. The test forces
 // the interleaving:
 //
-//  1. childA holds a pending callback → commits to PENDING
+//  1. childA waits on a pending callback
 //  2. childB is blocked in non-durable work (channel receive)
-//  3. handler unwinds → invocation answers PENDING immediately
+//  3. handler unwinds with the suspension sentinel → invocation answers
+//     PENDING immediately
 //  4. childB unblocks → attempts to checkpoint its step result
 //  5. checkpoint is refused (errCheckpointTerminated)
 //  6. childB settles its future with errSuspendExecution and signals done
@@ -440,8 +442,10 @@ func TestAbandonedGoChildCheckpointRefused(t *testing.T) {
 			return "", err
 		})
 
-		// Await childA — its pending callback suspends the invocation.
-		_, _ = childA.Result()
+		// The handler unwinds with the suspension sentinel while childA
+		// waits on its callback and childB runs non-durable work, so the
+		// invocation answers PENDING without joining them.
+		_ = childA
 		return "", errSuspendExecution
 	}, withLambdaAPI(fake))
 

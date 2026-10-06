@@ -765,3 +765,60 @@ func TestDispatchOperationHelpersConcurrent(t *testing.T) {
 		t.Fatalf("hooks called %d times, want 200", n.Load())
 	}
 }
+
+// TestOperationLifecycleStepInterruptedAtMostOnce asserts the hooks of an
+// AtMostOncePerRetry step whose previous attempt was interrupted. The
+// invocation re-enters the step before it settled, so it replays the start
+// with the checkpointed start time. With no retry it records the terminal
+// failure, so it dispatches the live end with the failure.
+func TestOperationLifecycleStepInterruptedAtMostOnce(t *testing.T) {
+	rec := &opRecorder{}
+	executed := false
+	handler := Wrap(func(ctx Context, _ string) (string, error) {
+		return Step(ctx, "once", func(StepContext) (string, error) {
+			executed = true
+			return "", nil
+		}, WithSemantics(AtMostOncePerRetry), WithRetry(NoRetry()))
+	}, WithPlugins(rec.plugin()), withLambdaAPI(&fakePluginClient{}))
+
+	ops := []wireOperation{
+		lifecycleExecOp(),
+		{
+			Id: hashID("1"), Status: "STARTED", Type: "STEP", SubType: "Step", Name: "once",
+			StepDetails:    &wireStepDetails{Attempt: 0},
+			StartTimestamp: flexTimestamp{Time: lifecycleStart, Valid: true},
+		},
+	}
+	resp, err := handler(makePluginContext(), makePluginPayload(t, "arn:test:lifecycle", "tok1", ops))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed {
+		t.Fatal("step body re-executed under at-most-once semantics")
+	}
+	assertPluginResponseStatus(t, resp, invocationFailed)
+	evs := rec.take()
+	assertSequence(t, evs,
+		"start:once:STARTED:true",
+		"end:once:FAILED:false",
+	)
+	for _, ev := range evs {
+		assertIdentity(t, ev, "1", "once", string(OperationTypeStep), OperationSubTypeStep, "")
+		if !ev.info.StartTimestamp.Equal(lifecycleStart) {
+			t.Errorf("%s StartTimestamp = %v, want %v", ev.hook, ev.info.StartTimestamp, lifecycleStart)
+		}
+		if ev.info.Attempt != 1 {
+			t.Errorf("%s Attempt = %d, want 1", ev.hook, ev.info.Attempt)
+		}
+	}
+	if !evs[0].info.EndTimestamp.IsZero() {
+		t.Error("start EndTimestamp must be zero")
+	}
+	if evs[1].info.EndTimestamp.IsZero() {
+		t.Error("end EndTimestamp is zero")
+	}
+	var stepErr *StepError
+	if !errors.As(evs[1].info.Error, &stepErr) || stepErr.ErrorType != "StepInterruptedError" {
+		t.Errorf("end Error = %v, want *StepError with ErrorType StepInterruptedError", evs[1].info.Error)
+	}
+}

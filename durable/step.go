@@ -66,10 +66,13 @@ func (f stepOptionFunc) applyStep(o *stepOptions) { f(o) }
 // A step is a single atomic unit of work and must not create durable
 // operations. To group durable operations, use [RunInChildContext] or [Go].
 //
-// If fn fails and its retry strategy schedules another attempt, the
-// execution suspends and resumes in a new invocation when the retry delay
-// elapses. If fn fails after exhausting its retry strategy, Step returns a
-// [*StepError].
+// If fn fails and its retry strategy schedules another attempt, the next
+// attempt runs when the retry delay elapses. When that happens while other
+// work of the handler is still running, it runs in the same invocation.
+// When nothing else can make progress, the invocation ends and the
+// execution resumes in a new invocation when the delay elapses, so a
+// retrying step does not hold the invocation open. If fn fails after
+// exhausting its retry strategy, Step returns a [*StepError].
 func Step[O any](ctx Context, name string, fn func(StepContext) (O, error), opts ...StepOption) (O, error) {
 	var zero O
 	ec, ok := ctx.(*execContext)
@@ -94,8 +97,10 @@ func Step[O any](ctx Context, name string, fn func(StepContext) (O, error), opts
 // claimed before StepAsync returns, so consecutive StepAsync calls from one
 // goroutine are replay-deterministic.
 //
-// On invocation suspension, the returned future is settled with
-// errSuspendExecution so goroutines blocked on [Future.Result] unwind.
+// A retry whose next attempt becomes due while other work runs runs in the
+// same invocation, as for [Step]. On invocation suspension, the returned
+// future is settled with errSuspendExecution so goroutines blocked on
+// [Future.Result] unwind.
 func StepAsync[O any](ctx Context, name string, fn func(StepContext) (O, error), opts ...StepOption) *Future[O] {
 	ec, ok := ctx.(*execContext)
 	if !ok {
@@ -134,9 +139,44 @@ func StepAsync[O any](ctx Context, name string, fn func(StepContext) (O, error),
 	return fut
 }
 
+// errRetryScheduled matches the error settleStepFailure returns after it
+// checkpointed a RETRY. runStep then waits for the next attempt to become
+// due. It never leaves runStep.
+var errRetryScheduled = errors.New("durable: step retry scheduled")
+
+// retryScheduledError reports a checkpointed RETRY and when its next
+// attempt is due by the local clock.
+type retryScheduledError struct {
+	due time.Time
+}
+
+func (e *retryScheduledError) Error() string { return errRetryScheduled.Error() }
+
+func (e *retryScheduledError) Is(target error) bool { return target == errRetryScheduled }
+
+// retryDue returns when the retry reported by err is due, or zero.
+func retryDue(err error) time.Time {
+	var r *retryScheduledError
+	if errors.As(err, &r) {
+		return r.due
+	}
+	return time.Time{}
+}
+
 // runStep drives one step operation from its checkpointed status: return a
-// terminal outcome from replay, suspend on a scheduled retry, or execute an
-// attempt.
+// terminal outcome from replay, wait for a scheduled retry, or execute an
+// attempt. After a RETRY checkpoint, or when the step is replayed with a
+// retry pending, the goroutine parks until a checkpoint response or a poll
+// reports the step READY, and the next attempt then runs in the same
+// invocation. The first poll is sent when the next attempt is due. The
+// invocation suspends instead when nothing else can make progress first.
+//
+// Operation lifecycle hooks: the live start is dispatched once per
+// invocation, before the first attempt the invocation runs. A step whose
+// previous attempt was interrupted under AtMostOncePerRetry replays its
+// start instead, with IsReplay true and the checkpointed start time. The end is
+// dispatched with the step's outcome; a step that is still waiting for an
+// attempt when the invocation suspends dispatches no end.
 func runStep[O any](ec *execContext, id, name string, fn func(StepContext) (O, error), options stepOptions) (O, error) {
 	var zero O
 	op := ec.state.get(id)
@@ -148,99 +188,146 @@ func runStep[O any](ec *execContext, id, name string, fn func(StepContext) (O, e
 		return zero, ec.parkUnfinishedReplay(op, id, string(OperationTypeStep), OperationSubTypeStep, name)
 	}
 
-	attempt := 1
-	if op != nil && op.step != nil {
-		attempt = op.step.attempt + 1
-	}
-
 	currentMode := executionMode(ec.mode.Load())
 	isReplay := currentMode == modeReplay || currentMode == modeReplaySucceededContext
 
-	if op != nil {
-		switch op.status {
-		case statusSucceeded:
-			if op.step == nil {
-				return zero, fmt.Errorf("durable: step %q: checkpointed %s operation has no step details", name, op.status)
-			}
-			// Fire operation hooks for replayed terminal operations.
-			info := ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, true)
-			info.Attempt = op.step.attempt
-			info.StartTimestamp = op.startTimestamp
-			info.Result = op.step.result
-			dispatchOperationStart(ec, info, PluginOperationSucceeded)
-			var out O
-			if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &out); err != nil {
-				return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
-			}
-			info.EndTimestamp = op.endTimestamp
-			dispatchOperationEnd(ec, info, PluginOperationSucceeded)
-			return out, nil
-
-		case statusFailed:
-			if op.step == nil {
-				return zero, fmt.Errorf("durable: step %q: checkpointed %s operation has no step details", name, op.status)
-			}
-			info := ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, true)
-			info.Attempt = op.step.attempt
-			info.StartTimestamp = op.startTimestamp
-			info.Error = op.step.record().standIn(nil)
-			dispatchOperationStart(ec, info, PluginOperationFailed)
-			stepErr := newStepError(name, op.step.attempt, op.step.record())
-			info.EndTimestamp = op.endTimestamp
-			info.Error = stepErr.Err
-			dispatchOperationEnd(ec, info, PluginOperationFailed)
-			return zero, stepErr
-
-		case statusPending:
-			// A retry is scheduled and its timer has not fired.
-			// Suspend; the backend re-invokes when the attempt is due.
-			// Operation hooks NOT fired for still-pending operations.
-			ec.blocked.Store(true)
-			ec.suspend.commitPending(ec.abandon)
-			return zero, errSuspendExecution
-
-		case statusStarted:
-			if options.semantics == AtMostOncePerRetry {
-				// The previous attempt was interrupted before
-				// recording an outcome and must not re-execute.
-				return settleStepFailure[O](ec, id, name, options, &StepInterruptedError{Name: name}, nil, attempt)
-			}
-
-		case statusReady, statusCancelled, statusTimedOut, statusStopped:
-			// READY executes below. The remaining statuses are not
-			// produced for step operations; execute and let the
-			// backend reject the update if the state is invalid.
+	// lastAttempt is the attempt this invocation ran last, 0 before the
+	// first. A READY record that omits the attempt count still advances.
+	lastAttempt := 0
+	var liveInfo OperationHookInfo
+	started := false
+	for {
+		attempt := lastAttempt + 1
+		if op != nil && op.step != nil {
+			attempt = max(attempt, op.step.attempt+1)
 		}
+
+		if op != nil {
+			switch op.status {
+			case statusSucceeded:
+				if op.step == nil {
+					return zero, fmt.Errorf("durable: step %q: checkpointed %s operation has no step details", name, op.status)
+				}
+				// Fire operation hooks for replayed terminal operations.
+				info := ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, true)
+				info.Attempt = op.step.attempt
+				info.StartTimestamp = op.startTimestamp
+				info.Result = op.step.result
+				dispatchOperationStart(ec, info, PluginOperationSucceeded)
+				var out O
+				if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &out); err != nil {
+					return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+				}
+				info.EndTimestamp = op.endTimestamp
+				dispatchOperationEnd(ec, info, PluginOperationSucceeded)
+				return out, nil
+
+			case statusFailed:
+				if op.step == nil {
+					return zero, fmt.Errorf("durable: step %q: checkpointed %s operation has no step details", name, op.status)
+				}
+				info := ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, true)
+				info.Attempt = op.step.attempt
+				info.StartTimestamp = op.startTimestamp
+				info.Error = op.step.record().standIn(nil)
+				dispatchOperationStart(ec, info, PluginOperationFailed)
+				stepErr := newStepError(name, op.step.attempt, op.step.record())
+				info.EndTimestamp = op.endTimestamp
+				info.Error = stepErr.Err
+				dispatchOperationEnd(ec, info, PluginOperationFailed)
+				return zero, stepErr
+
+			case statusPending:
+				// A retry is scheduled and its timer has not fired.
+				// Wait until the next attempt is due. Operation hooks
+				// are not fired for a still-pending operation.
+				next, err := ec.awaitOperation(id, attemptDueRecord, nextAttemptTime(time.Time{}))
+				if err != nil {
+					return zero, err
+				}
+				op = next
+				continue
+
+			case statusStarted:
+				if options.semantics == AtMostOncePerRetry && lastAttempt == 0 {
+					// The previous attempt was interrupted before
+					// recording an outcome and must not re-execute. The
+					// step is re-entered before it settled, so its start
+					// is replayed; the end belongs to this invocation when
+					// it records the terminal failure.
+					started = true
+					liveInfo = ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, true)
+					liveInfo.Attempt = attempt
+					liveInfo.StartTimestamp = op.startTimestamp
+					dispatchOperationStart(ec, liveInfo, PluginOperationStarted)
+					liveInfo.IsReplay = false
+					result, err := settleStepFailure[O](ec, id, name, options, &StepInterruptedError{Name: name}, nil, attempt)
+					if !errors.Is(err, errRetryScheduled) {
+						if err != nil && !errors.Is(err, errSuspendExecution) {
+							liveInfo.EndTimestamp = time.Now()
+							liveInfo.Error = err
+							dispatchOperationEnd(ec, liveInfo, PluginOperationFailed)
+						}
+						return result, err
+					}
+					lastAttempt = attempt
+					next, aerr := ec.awaitOperation(id, attemptDueRecord, nextAttemptTime(retryDue(err)))
+					if aerr != nil {
+						return zero, aerr
+					}
+					op = next
+					continue
+				}
+
+			case statusReady, statusCancelled, statusTimedOut, statusStopped:
+				// READY executes below. The remaining statuses are not
+				// produced for step operations; execute and let the
+				// backend reject the update if the state is invalid.
+			}
+		}
+
+		// OnOperationStart for live execution, once per invocation.
+		if !started {
+			started = true
+			liveInfo = ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, isReplay)
+			liveInfo.Attempt = attempt
+			liveInfo.StartTimestamp = time.Now()
+			dispatchOperationStart(ec, liveInfo, PluginOperationStarted)
+		}
+		liveInfo.Attempt = attempt
+
+		// The attempt counts as executing from its START checkpoint through
+		// the checkpoint of its outcome, so an invocation whose handler blocks
+		// meanwhile waits for the outcome to be recorded before it suspends.
+		result, err := func() (O, error) {
+			ec.suspend.enterExecuting()
+			defer ec.suspend.exitExecuting()
+			return executeStepAttempt(ec, id, name, fn, options, op, attempt)
+		}()
+		lastAttempt = attempt
+
+		if errors.Is(err, errRetryScheduled) {
+			next, aerr := ec.awaitOperation(id, attemptDueRecord, nextAttemptTime(retryDue(err)))
+			if aerr != nil {
+				return zero, aerr
+			}
+			op = next
+			continue
+		}
+
+		// OnOperationEnd for live execution.
+		if err == nil {
+			liveInfo.EndTimestamp = time.Now()
+			dispatchOperationEnd(ec, liveInfo, PluginOperationSucceeded)
+		} else if !errors.Is(err, errSuspendExecution) {
+			liveInfo.EndTimestamp = time.Now()
+			liveInfo.Error = err
+			dispatchOperationEnd(ec, liveInfo, PluginOperationFailed)
+		}
+		// If errSuspendExecution: the invocation ended under the step, no
+		// OnOperationEnd.
+		return result, err
 	}
-
-	// OnOperationStart for live execution.
-	startTime := time.Now()
-	liveInfo := ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeStep, isReplay)
-	liveInfo.Attempt = attempt
-	liveInfo.StartTimestamp = startTime
-	dispatchOperationStart(ec, liveInfo, PluginOperationStarted)
-
-	// The attempt counts as executing from its START checkpoint through
-	// the checkpoint of its outcome, so an invocation whose handler blocks
-	// meanwhile waits for the outcome to be recorded before it suspends.
-	result, err := func() (O, error) {
-		ec.suspend.enterExecuting()
-		defer ec.suspend.exitExecuting()
-		return executeStepAttempt(ec, id, name, fn, options, op, attempt)
-	}()
-
-	// OnOperationEnd for live execution.
-	if err == nil {
-		liveInfo.EndTimestamp = time.Now()
-		dispatchOperationEnd(ec, liveInfo, PluginOperationSucceeded)
-	} else if !errors.Is(err, errSuspendExecution) {
-		liveInfo.EndTimestamp = time.Now()
-		liveInfo.Error = err
-		dispatchOperationEnd(ec, liveInfo, PluginOperationFailed)
-	}
-	// If errSuspendExecution: operation is still pending, no OnOperationEnd.
-
-	return result, err
 }
 
 // executeStepAttempt runs one attempt of the step body and checkpoints its
@@ -387,8 +474,8 @@ func executeStepAttempt[O any](ec *execContext, id, name string, fn func(StepCon
 }
 
 // settleStepFailure consults the retry strategy for a failed attempt and
-// checkpoints the outcome: RETRY with a delay (then suspends the
-// invocation) or FAIL when retries are exhausted. trace is the stack trace
+// checkpoints the outcome: RETRY with a delay, then returns an error
+// matching errRetryScheduled, or FAIL when retries are exhausted. trace is the stack trace
 // captured where the step body failed; it is recorded with the failure.
 func settleStepFailure[O any](ec *execContext, id, name string, options stepOptions, cause error, trace []string, attempt int) (O, error) {
 	var zero O
@@ -429,11 +516,9 @@ func settleStepFailure[O any](ec *execContext, id, name string, options stepOpti
 		return zero, err
 	}
 
-	// The backend owns the retry timer: suspend and resume in a new
-	// invocation once the delay elapses.
-	ec.blocked.Store(true)
-	ec.suspend.commitPending(ec.abandon)
-	return zero, errSuspendExecution
+	// The service owns the retry timer and reports the step READY once
+	// the delay elapses; the caller waits for that.
+	return zero, &retryScheduledError{due: time.Now().Add(time.Duration(delaySec) * time.Second)}
 }
 
 // runStepFunc executes the step body with panic recovery: a panicking step

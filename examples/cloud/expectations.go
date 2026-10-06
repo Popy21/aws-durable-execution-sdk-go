@@ -201,30 +201,6 @@ func loadExamples(path string) ([]string, error) {
 	return examples, nil
 }
 
-// checkForceCheckpointStepRetry verifies the force-checkpoint-step-retry
-// example. The force-checkpoint examples return the Parallel result
-// serialized as a JSON string, so the result is decoded twice. Item 0 is
-// the long-running branch, which succeeds; item 1 is the retrying branch,
-// which fails (status 2) with a StepError.
-func checkForceCheckpointStepRetry(t testing.TB, result string) {
-	t.Helper()
-	var inner string
-	if err := json.Unmarshal([]byte(result), &inner); err != nil {
-		t.Fatalf("result is not a JSON string: %v\n%s", err, result)
-	}
-	obj := resultObject(t, inner)
-	items, ok := obj["Items"].([]any)
-	if !ok || len(items) != 2 {
-		t.Fatalf("expected 2 items, got %v", obj["Items"])
-	}
-	first, _ := items[0].(map[string]any)
-	assertFields(t, first, map[string]any{"Name": "long-running", "Result": "long-complete"})
-	second, _ := items[1].(map[string]any)
-	assertFields(t, second, map[string]any{"Name": "retrying", "Status": float64(2)})
-	errObj, _ := second["Err"].(map[string]any)
-	assertFields(t, errObj, map[string]any{"ErrorType": "StepError"})
-}
-
 // expectations is the single table of expected outcomes, keyed by example
 // name. It is the source of truth for the "Expected Terminal State" column
 // in examples/README.md.
@@ -278,13 +254,10 @@ var expectations = map[string]expectation{
 	"error-determinism":       {result: `{"isDeterministic":true,"errorPropsBeforeReplay":{"isStepError":true,"causeName":"Error"},"errorPropsAfterReplay":{"isStepError":true,"causeName":"Error"}}`},
 	"error-handling-taxonomy": {result: `{"stepErrorInfo":{"matched":true,"typeName":"StepError","operationName":"failing-step","attempts":1,"isOpError":true,"opErrorName":"failing-step","errorType":"Error"},"invokeErrorInfo":{"matched":true,"typeName":"InvokeError","operationName":"failing-invoke","isOpError":true,"opErrorName":"failing-invoke","errorType":"Error"},"callbackErrorInfo":{"matched":true,"typeName":"CallbackExternalError","operationName":"failing-callback","isOpError":true,"opErrorName":"failing-callback","errorType":"CallbackError"}}`},
 
-	"force-checkpoint-callback": {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"callbacks\",\"Status\":1,\"Result\":\"callbacks-complete\",\"Err\":null}],\"Reason\":1}"`},
-	"force-checkpoint-invoke":   {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"invokes\",\"Status\":1,\"Result\":\"invokes-complete\",\"Err\":null}],\"Reason\":1}"`},
-	"force-checkpoint-step-retry": {
-		nondeterministic: "the failed branch's error carries stack-trace frames whose file paths depend on the build machine",
-		check:            checkForceCheckpointStepRetry,
-	},
-	"force-checkpoint-wait": {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"waits\",\"Status\":1,\"Result\":\"waits-complete\",\"Err\":null}],\"Reason\":1}"`},
+	"force-checkpoint-callback":   {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"callbacks\",\"Status\":1,\"Result\":\"callbacks-complete\",\"Err\":null}],\"Reason\":1}"`},
+	"force-checkpoint-invoke":     {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"invokes\",\"Status\":1,\"Result\":\"invokes-complete\",\"Err\":null}],\"Reason\":1}"`},
+	"force-checkpoint-step-retry": {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"retrying\",\"Status\":1,\"Result\":\"retry-complete\",\"Err\":null}],\"Reason\":1}"`},
+	"force-checkpoint-wait":       {result: `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"waits\",\"Status\":1,\"Result\":\"waits-complete\",\"Err\":null}],\"Reason\":1}"`},
 
 	"future-all":         {result: `["result 1","result 2","result 3"]`},
 	"future-all-settled": {result: `{"outcomes":["fulfilled: success","rejected: durable: step \"failure\" failed after 0 attempts: Error: failure","fulfilled: another success"]}`},

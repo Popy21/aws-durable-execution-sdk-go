@@ -81,10 +81,10 @@ type execContext struct {
 	// because a virtual child inside a flat item is supported.
 	virtual bool
 
-	// blocked is set when an operation on this context enters a pending
-	// state (commits to suspension). Once set, subsequent claims on this
-	// same context fail with errSuspendExecution, preventing user code
-	// that swallows errors from starting new operations. Sibling contexts
+	// blocked is set when an operation on this context unwinds with the
+	// suspension sentinel. Once set, subsequent claims on this same
+	// context fail with errSuspendExecution, preventing user code that
+	// swallows errors from starting new operations. Sibling contexts
 	// (different goroutines) are not affected.
 	blocked atomic.Bool
 
@@ -511,25 +511,26 @@ const unfinishedReplayParkTimeout = time.Second
 // operation's checkpoint, or nil when it has none; id, opType, subType and
 // name describe the operation the current code asked for.
 //
-// The operation must not execute and cannot settle in this invocation. No
-// pending commitment is made: an unfinished operation inside a succeeded
-// context must not force the invocation to PENDING. The caller therefore
-// blocks until one of three events, then unwinds:
+// The operation must not execute and cannot settle in this invocation. It
+// is not watched: an unfinished operation inside a succeeded context must
+// not force the invocation to PENDING. The caller therefore blocks until
+// one of three events, then unwinds:
 //
-//  1. The invocation suspends because other branches committed to PENDING
-//     and deregistered. The context is marked blocked and the caller
-//     unwinds with errSuspendExecution.
+//  1. The invocation suspends because other branches are blocked on
+//     operations that are not finished. The context is marked blocked and
+//     the caller unwinds with errSuspendExecution.
 //  2. unfinishedReplayParkTimeout elapses.
 //  3. The Lambda context ends.
 //
-// Events 2 and 3 share one outcome, decided by whether a pending commitment
-// exists at that moment. If one does, the invocation responds PENDING
+// Events 2 and 3 share one outcome, decided by whether the invocation is
+// committed to PENDING at that moment (see suspendSignal.committed). If it
+// is, the invocation responds PENDING
 // whatever the handler returns, so the context is marked blocked and the
 // caller unwinds with errSuspendExecution. If none does, the caller unwinds
 // with a *NonDeterministicReplayError that names the unfinished operation.
 //
 // Event 2 is what bounds the wait. A parking branch that is the last active
-// branch has no pending commitment, so nothing can fire the suspend signal;
+// branch awaits nothing that is watched, so nothing can fire the signal;
 // without the deadline it would wait for the Lambda deadline, the
 // invocation would end PENDING, and the next invocation would repeat the
 // same wait. A synchronous await of an operation that had not completed
@@ -548,11 +549,11 @@ const unfinishedReplayParkTimeout = time.Second
 //
 // The branch token is released before parking only when this context
 // registered it (ownsBranchTok). An asynchronous operation's branch owns
-// its token, so releasing it lets a sibling's commitment fire the signal
-// while this goroutine is parked. A child context created on its parent's
+// its token, so releasing it lets the signal fire while this goroutine is
+// parked, once every sibling is blocked. A child context created on its parent's
 // goroutine inherits the parent's token and does not own it; releasing
 // that token would deregister a goroutine that is still running, and for
-// the root handler it would let a commitment made after the handler
+// the root handler it would let a branch that blocks after the handler
 // returned change the invocation's outcome. Such a child parks with the
 // token held, and the owning goroutine releases it when it unwinds.
 func (c *execContext) parkUnfinishedReplay(op *operation, id, opType, subType, name string) error {

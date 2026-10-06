@@ -7,40 +7,53 @@ import (
 	"time"
 )
 
-// suspendSignal coordinates suspension of one invocation. It has two
-// mechanisms:
+// suspendSignal coordinates suspension of one invocation. The invocation
+// ends with PENDING only when no goroutine running handler code can make
+// progress in it. Four mechanisms decide that:
 //
-//  1. Pending commitment: set when any operation encounters a state that
-//     requires suspension (replayed STARTED wait, freshly checkpointed
-//     START for a blocking operation, etc.). Once committed, the invocation
-//     MUST return PENDING regardless of what user code does. This prevents
-//     user code from swallowing errSuspendExecution and returning a bogus
-//     success. A commitment made by an operation running under an
-//     abandonable batch-branch subtree is recorded against that subtree's
-//     abandon handle so it can be retired if the parent batch abandons the
-//     branch after early completion; every other commitment is
-//     unconditional.
+//  1. Active-branch accounting: counts the goroutines that run handler
+//     code. Each holds a branch token from registration until it returns.
 //
-//  2. Active-branch accounting: tracks the number of goroutines that can
-//     independently make forward progress. When the last branch
-//     deregisters, the signal fires: all registered futures are settled
-//     with errSuspendExecution so goroutines blocked on Future.Result()
-//     unwind without hanging. Branches that are still able to make
-//     progress keep running and checkpointing until they too block.
+//  2. Parking: a goroutine that blocks inside the SDK, on an operation
+//     that is not finished, on a [Future], or on the branches of a batch,
+//     is counted as parked for as long as it blocks. The goroutine that
+//     ends the block (a checkpoint response that reports the operation
+//     finished, the settlement of the future) unparks it before it can
+//     observe the change, so the parked count never includes a goroutine
+//     that is about to resume.
 //
-//  3. Executing-span accounting: counts step attempts and condition checks
+//  3. Operation watches: each operation a goroutine is parked on has a
+//     watch. Every checkpoint response is matched against the watches. A
+//     response that reports a watched operation finished, or a step retry
+//     or condition check due again (READY), resumes the goroutines parked
+//     on it in this invocation. While an operation is watched and not
+//     finished, the SDK polls its status with a checkpoint request that
+//     carries no updates; see [pollSchedule].
+//
+//  4. Executing-span accounting: counts step attempts and condition checks
 //     whose user code is running or whose outcome is being checkpointed,
-//     and child contexts whose completion is being checkpointed. When the
-//     handler goroutine blocks on a pending operation, the invocation
-//     waits until this count has been zero for a settle period, or until
-//     no branch remains that could start a span, before responding
-//     PENDING, so the outcome of work already under way is recorded
-//     rather than discarded and repeated.
+//     and child contexts whose completion is being checkpointed.
 //
-// The fired() predicate is true once a commitment exists AND all active
-// branches have deregistered (i.e., the signal has fired). User-facing code
-// paths (the handler select, claimOperation) still use fired() to detect
-// suspension.
+// The invocation suspends when every active branch is parked or has
+// returned, no checkpoint request is queued or in flight, no span is
+// executing, and at least one watched operation is still not finished (or
+// a commitment stands, see below). The conditions are checked again after
+// a settle period, together with a generation stamp that every change to
+// them advances, and the signal fires only if nothing changed. Firing
+// settles every registered future and every parked operation waiter with
+// errSuspendExecution, so blocked goroutines unwind.
+//
+// A commitment is a request to end the invocation with PENDING that no
+// checkpoint response can withdraw. Only a [Race] over no futures makes
+// one. A commitment made under an abandonable batch-branch subtree is
+// recorded against that subtree's abandon handle, so it can be retired if
+// the parent batch abandons the branch after early completion.
+//
+// Once fired, the invocation MUST return PENDING regardless of what user
+// code does. This prevents user code from swallowing errSuspendExecution
+// and returning a bogus success. The fired() predicate is true once the
+// signal has fired. User-facing code paths (the handler select,
+// claimOperation) use it to detect suspension.
 type suspendSignal struct {
 	once sync.Once
 	ch   chan struct{}
@@ -57,9 +70,9 @@ type suspendSignal struct {
 	// which a future registered after the drain is never settled.
 	firing bool
 
-	// active tracks the number of branches (goroutines) that can
-	// independently make progress. When active reaches zero and a
-	// commitment remains, the signal fires.
+	// active tracks the number of branches (goroutines) that run handler
+	// code and have not returned. A branch that is parked still counts;
+	// see parked.
 	active int
 
 	// activeDone is non-nil while active is above zero and is closed when
@@ -101,6 +114,56 @@ type suspendSignal struct {
 	// entry cannot reappear after retirement. Entries exist only while a
 	// commitment stands, so the map stays bounded.
 	branchCommits map[*abandonHandle]int
+
+	// parked counts the active branches currently blocked inside the SDK.
+	// active minus parked is the number of branches that can make
+	// progress without an outside event.
+	parked int
+
+	// gen advances on every change to the suspension conditions: a branch
+	// registers, deregisters, parks or unparks, a span begins or ends, a
+	// checkpoint request is queued or settled, or an operation is watched.
+	// maybeSuspend compares it across its settle period.
+	gen uint64
+
+	// settling is set while a settle period is being observed, so at most
+	// one is observed at a time.
+	settling bool
+
+	// settle is the settle period. The zero value selects
+	// defaultSuspendSettle.
+	settle time.Duration
+
+	// watches holds one watch per operation a goroutine is parked on,
+	// keyed by wire operation ID. A watch exists only while it has
+	// waiters.
+	watches map[string]*opWatch
+
+	// checkpointBusy reports whether a checkpoint request is queued or in
+	// flight. nil when no checkpointer is wired, as in unit tests.
+	checkpointBusy func() bool
+
+	// poller sends a checkpoint request that carries no updates. Its
+	// response is matched against the watches like any other. nil
+	// disables polling.
+	poller func() error
+
+	// deadline is the invocation deadline, zero when the invocation has
+	// none. No poll is scheduled to fire within minPollRemaining of it.
+	deadline time.Time
+
+	// ctxDone is closed when the invocation's context ends. From then on
+	// a running branch, an executing span, or a checkpoint in flight no
+	// longer holds the response: the invocation suspends as soon as an
+	// operation is awaited. nil when not wired.
+	ctxDone <-chan struct{}
+
+	// clock schedules polls. Tests replace it.
+	clock pollClock
+
+	// pollsStopped is set when polling ends for the invocation: on fire
+	// and when the invocation's response is decided.
+	pollsStopped bool
 }
 
 // abandonHandle marks one abandonable batch-branch subtree. A batch mints
@@ -195,6 +258,16 @@ func (s *suspendSignal) fire() {
 		s.firing = true
 		fs := s.futures
 		s.futures = nil // release references
+		// Every goroutine parked on an operation resumes with the
+		// suspension sentinel, and no further poll is sent.
+		s.pollsStopped = true
+		for id, w := range s.watches {
+			w.stopTimerLocked()
+			for _, pw := range w.waiters {
+				s.wakeLocked(pw, errSuspendExecution)
+			}
+			delete(s.watches, id)
+		}
 		s.mu.Unlock()
 
 		// Settle all in-flight futures so goroutines blocked on
@@ -221,10 +294,11 @@ func (s *suspendSignal) fired() bool {
 	}
 }
 
-// committed reports whether the invocation is committed to PENDING. This
-// returns true as soon as any live commitment exists, even if other
-// branches are still active. The handler uses this to override a swallowed
-// errSuspendExecution.
+// committed reports whether the invocation is committed to PENDING: a
+// commitment stands, or a goroutine is parked on an operation that is not
+// finished. It returns true even if other branches are still active. The
+// handler uses it when the handler returns while an orphaned branch is
+// still blocked, and the park path of an unfinished replay uses it.
 func (s *suspendSignal) committed() bool {
 	s.mu.Lock()
 	c := s.committedLocked()
@@ -235,6 +309,22 @@ func (s *suspendSignal) committed() bool {
 // committedLocked reports whether a live commitment exists. Caller must
 // hold mu.
 func (s *suspendSignal) committedLocked() bool {
+	if s.commitmentLocked() {
+		return true
+	}
+	for _, w := range s.watches {
+		for _, pw := range w.waiters {
+			if !pw.detached {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commitmentLocked reports whether a commitment made by commitPending
+// stands. Caller must hold mu.
+func (s *suspendSignal) commitmentLocked() bool {
 	if s.rootCommitted {
 		return true
 	}
@@ -247,12 +337,12 @@ func (s *suspendSignal) committedLocked() bool {
 }
 
 // commitPending marks the invocation as committed to PENDING. Called when
-// an operation enters a blocking state (checkpointed START for wait/invoke,
-// retry timer pending, etc.). retirable is the abandon handle of the
-// operation's batch-branch subtree, or nil for an operation outside any
-// abandonable subtree: a nil handle commits unconditionally, a non-nil one
-// records a retirable commitment against that handle. If no active branches
-// remain after this call, fires the signal immediately.
+// an operation can never settle in this invocation (a [Race] over no
+// futures). retirable is the abandon handle of the operation's
+// batch-branch subtree, or nil for an operation outside any abandonable
+// subtree: a nil handle commits unconditionally, a non-nil one records a
+// retirable commitment against that handle. The signal fires once the
+// suspension conditions hold; see maybeSuspend.
 //
 // A commitment against a handle whose subtree, or any enclosing subtree,
 // has been abandoned is a no-op: nothing is recorded and the signal is not
@@ -277,12 +367,10 @@ func (s *suspendSignal) commitPending(retirable *abandonHandle) {
 	} else {
 		s.rootCommitted = true
 	}
-	shouldFire := s.active <= 0
+	s.gen++
 	s.mu.Unlock()
 
-	if shouldFire {
-		s.fire()
-	}
+	s.maybeSuspend()
 }
 
 // retireCommitment marks an abandonable batch-branch subtree abandoned and
@@ -305,10 +393,9 @@ func (s *suspendSignal) commitPending(retirable *abandonHandle) {
 // a nested batch that the durable.Go branch starts after retirement: both
 // carry a handle beneath the retiring one.
 //
-// retireCommitment only removes commitments and never fires. The signal
-// fires when the last active branch deregisters while a commitment stands;
-// that rule is unchanged, and no goroutine waits on retirement to settle a
-// future.
+// retireCommitment only removes commitments and never fires. Goroutines
+// parked on an operation under the subtree are resumed by wakeAbandoned,
+// which the batch calls when it abandons the branch.
 func (s *suspendSignal) retireCommitment(retirable *abandonHandle) {
 	if retirable == nil {
 		return
@@ -331,25 +418,23 @@ func (s *suspendSignal) registerBranch() {
 		s.activeDone = make(chan struct{})
 	}
 	s.active++
+	s.gen++
 	s.mu.Unlock()
 }
 
-// deregisterBranch decrements the active branch count. If the count
-// reaches zero and the invocation is committed to PENDING, fires the
-// suspension signal. Safe to call after the signal has already fired.
+// deregisterBranch decrements the active branch count and checks the
+// suspension conditions. Safe to call after the signal has already fired.
 func (s *suspendSignal) deregisterBranch() {
 	s.mu.Lock()
 	s.active--
+	s.gen++
 	if s.active <= 0 && s.activeDone != nil {
 		close(s.activeDone)
 		s.activeDone = nil
 	}
-	shouldFire := s.active <= 0 && s.committedLocked()
 	s.mu.Unlock()
 
-	if shouldFire {
-		s.fire()
-	}
+	s.maybeSuspend()
 }
 
 // enterExecuting records that an executing span has started: a step
@@ -363,6 +448,7 @@ func (s *suspendSignal) enterExecuting() {
 	}
 	s.executing++
 	s.executingGen++
+	s.gen++
 	s.mu.Unlock()
 }
 
@@ -378,7 +464,10 @@ func (s *suspendSignal) exitExecuting() {
 			s.executingDone = nil
 		}
 	}
+	s.gen++
 	s.mu.Unlock()
+
+	s.maybeSuspend()
 }
 
 // awaitDrain blocks until no branch of this invocation can record further
@@ -452,7 +541,7 @@ func (s *suspendSignal) awaitDrain(ctx context.Context, settle time.Duration) {
 // branchToken is an idempotent handle to one active-branch registration.
 // The first release decrements the active count; later releases are no-ops,
 // so a branch is accounted exactly once even when several unwind paths can
-// each release it (a pending callback's pre-result hook and a deferred
+// each release it (the park path of an unfinished replay and a deferred
 // cleanup share one token).
 type branchToken struct {
 	s    *suspendSignal
@@ -491,9 +580,12 @@ func registerFuture[O any](s *suspendSignal, f *Future[O]) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The future parks the goroutines that await it on this signal, and
+	// its settlement unparks them under mu.
+	f.s = s
 	if s.firing {
 		var zero O
-		f.settle(zero, errSuspendExecution)
+		f.settleLocked(zero, errSuspendExecution)
 		return
 	}
 

@@ -229,9 +229,11 @@ type Plugin struct {
 	// after the attempt's result is checkpointed and before
 	// OnOperationEnd. With [PluginAttemptFailed] it fires when the body
 	// returns an error, or when the result cannot be serialized or is
-	// too large, before the retry decision: a retry that follows suspends
-	// the invocation and the next attempt fires OnOperationAttemptStart
-	// in a later invocation; a final failure fires OnOperationEnd. Like
+	// too large, before the retry decision. When a retry follows, the
+	// next attempt fires OnOperationAttemptStart once it is due: in the
+	// same invocation when it becomes due while other work of the handler
+	// can still make progress, or in a later invocation when the
+	// invocation suspends first. A final failure fires OnOperationEnd. Like
 	// OnOperationAttemptStart it fires only for live attempts. It is
 	// dispatched from the goroutine that runs the operation: on that
 	// goroutine with one plugin registered, on a goroutine the dispatch

@@ -762,13 +762,10 @@ func assertStepCheckpointed(t *testing.T, fake *fakeLambda, name string) {
 
 // TestAllDrainsSuspendedSiblings verifies that All awaits all futures and
 // propagates the suspension, ensuring concurrent siblings reach their
-// blocking points and checkpoint progress. The interleaving is forced:
-// child 2 is released specifically when All attempts f2.Result, using f2's
-// preResult hook as the synchronization gate, so child 2's submitter step
-// cannot run unless All drains past f1's suspension.
+// blocking points and checkpoint progress. The invocation suspends only
+// once child 2 has run its submitter step and blocked on its callback.
 func TestAllDrainsSuspendedSiblings(t *testing.T) {
 	fake := &fakeLambda{}
-	gate := make(chan struct{})
 	errCh := make(chan error, 1)
 
 	resp := invokeStep(t, fake, stepPayload(`"x"`), func(ctx Context, _ string) (string, error) {
@@ -781,10 +778,9 @@ func TestAllDrainsSuspendedSiblings(t *testing.T) {
 			return cb.Result()
 		})
 
-		// Child 2: wait for the gate, run a submitter step, then create
-		// a callback and await it, suspending the branch.
+		// Child 2: run a submitter step, then create a callback and
+		// await it, suspending the branch.
 		f2 := Go(ctx, "child2", func(childCtx Context) (string, error) {
-			<-gate
 			_, err := Step(childCtx, "submitter", func(_ StepContext) (string, error) {
 				return "submitted", nil
 			})
@@ -797,9 +793,6 @@ func TestAllDrainsSuspendedSiblings(t *testing.T) {
 			}
 			return cb.Result()
 		})
-
-		// The gate opens when All attempts f2.Result, releasing child 2.
-		f2.preResult = func() { close(gate) }
 
 		_, err := All(ctx, "all-drain", []*Future[string]{f1, f2})
 		errCh <- err
@@ -849,14 +842,11 @@ func TestAllSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 }
 
 // TestAllDrainsAfterRealError verifies that when a real error follows a
-// suspension in the future list, All still drains the remaining futures so
-// their branches reach blocking points, and the suspension takes precedence
-// over the error. Child 3 is released specifically when All attempts
-// f3.Result, so its trailing step can only run if the drain continues past
-// the real error.
+// suspension in the future list, All still awaits the remaining futures, and
+// the suspension takes precedence over the error. The invocation suspends
+// only once child 3 has run its trailing step and blocked on its callback.
 func TestAllDrainsAfterRealError(t *testing.T) {
 	fake := &fakeLambda{}
-	gate := make(chan struct{})
 	errCh := make(chan error, 1)
 
 	resp := invokeStep(t, fake, stepPayload(`"x"`), func(ctx Context, _ string) (string, error) {
@@ -872,9 +862,8 @@ func TestAllDrainsAfterRealError(t *testing.T) {
 		// f2: pre-settled with a real error.
 		f2 := newFailedFuture[string](errors.New("real-failure"))
 
-		// f3: gated on preResult, runs a step, then suspends.
+		// f3: runs a step, then suspends.
 		f3 := Go(ctx, "child3", func(childCtx Context) (string, error) {
-			<-gate
 			_, err := Step(childCtx, "trailing-step", func(_ StepContext) (string, error) {
 				return "trailing", nil
 			})
@@ -887,8 +876,6 @@ func TestAllDrainsAfterRealError(t *testing.T) {
 			}
 			return cb.Result()
 		})
-		f3.preResult = func() { close(gate) }
-
 		_, err := All(ctx, "all-err-drain", []*Future[string]{f1, f2, f3})
 		errCh <- err
 		return "", err
@@ -941,15 +928,14 @@ func TestAllFailsFastBeforeUnresolved(t *testing.T) {
 }
 
 // TestAllSettledSuspendThenTerminalPropagatesSuspension verifies that with
-// three futures, AllSettled drains past a suspension and propagates it even
-// when terminal outcomes follow. Child 2 is released specifically when
-// AllSettled attempts f2.Result, so its step can only run if the drain
-// continues past f1's suspension. The final future's preResult hook proves
+// three futures, AllSettled awaits past a suspension and propagates it even
+// when terminal outcomes follow it in input order. Child 2's step runs
+// before the invocation suspends, because the invocation suspends only once
+// no branch can make progress. The final future's preResult hook proves
 // AllSettled awaited every future, including the last one, before
 // returning.
 func TestAllSettledSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 	fake := &fakeLambda{}
-	gate := make(chan struct{})
 	errCh := make(chan error, 1)
 	var f3Awaited atomic.Bool
 
@@ -962,12 +948,10 @@ func TestAllSettledSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 			return cb.Result()
 		})
 		f2 := Go(ctx, "settler", func(childCtx Context) (string, error) {
-			<-gate
 			return Step(childCtx, "settle-step", func(_ StepContext) (string, error) {
 				return "settled", nil
 			})
 		})
-		f2.preResult = func() { close(gate) }
 		f3 := newFailedFuture[string](errors.New("settled-failure"))
 		f3.preResult = func() { f3Awaited.Store(true) }
 
@@ -1139,12 +1123,14 @@ func TestRaceReleasesLosingGoroutines(t *testing.T) {
 
 // TestAnySuspendThenWinnerPropagatesSuspension verifies that with three
 // futures, Any keeps draining once a suspension is observed and propagates
-// it even when a success and a real error follow. The interleaving is
-// forced through the observation hook: f2 and f3 settle only after the
-// receive loop has observed f1's suspension, so their outcomes always
-// arrive in drain mode. The outcomes recorded at the moment Any returns
-// prove all three futures were observed before it propagated the
-// suspension.
+// it even when a success and a real error follow. The invocation suspends
+// only when no branch can make progress, and suspension settles every
+// registered future at once, so the outcomes that follow come from futures
+// the test settles itself. The interleaving is forced through the
+// observation hook: f2 and f3 settle only after the receive loop has
+// observed f1's suspension, so their outcomes always arrive in drain mode.
+// The outcomes recorded at the moment Any returns prove all three futures
+// were observed before it propagated the suspension.
 func TestAnySuspendThenWinnerPropagatesSuspension(t *testing.T) {
 	fake := &fakeLambda{}
 	errCh := make(chan error, 1)
@@ -1162,13 +1148,12 @@ func TestAnySuspendThenWinnerPropagatesSuspension(t *testing.T) {
 			return cb.Result()
 		})
 
-		// f2: succeeds via a step only after the suspension is observed.
-		f2 := Go(ctx, "winner", func(childCtx Context) (string, error) {
+		// f2: succeeds only after the suspension is observed.
+		f2 := newFuture[string]()
+		go func() {
 			<-suspendObserved
-			return Step(childCtx, "win-step", func(_ StepContext) (string, error) {
-				return "won", nil
-			})
-		})
+			f2.settle("won", nil)
+		}()
 
 		// f3: fails with a real error only after the suspension is
 		// observed.
@@ -1192,8 +1177,6 @@ func TestAnySuspendThenWinnerPropagatesSuspension(t *testing.T) {
 	}
 	// Every future's outcome was observed before Any returned.
 	assertDrainedOutcomes(t, <-outcomesCh, 3)
-	// The drain let the winner branch finish its step before Any returned.
-	assertStepCheckpointed(t, fake, "win-step")
 }
 
 // TestAnyThreeFutureSuspendThenFail verifies that Any with a suspension and
@@ -1228,10 +1211,11 @@ func TestAnyThreeFutureSuspendThenFail(t *testing.T) {
 
 // TestRaceSuspendThenTerminalPropagatesSuspension verifies that with three
 // futures, Race keeps draining once a suspension is observed and propagates
-// it even when a success and a real error follow. The interleaving is
-// forced through the observation hook: f2 and f3 settle only after the
-// receive loop has observed f1's suspension, so their outcomes always
-// arrive in drain mode. The outcomes recorded at the moment Race returns
+// it even when a success and a real error follow. As in the Any variant,
+// the outcomes that follow the suspension come from futures the test
+// settles itself. The interleaving is forced through the observation hook:
+// f2 and f3 settle only after the receive loop has observed f1's
+// suspension, so their outcomes always arrive in drain mode. The outcomes recorded at the moment Race returns
 // prove all three futures were observed before it propagated the
 // suspension.
 func TestRaceSuspendThenTerminalPropagatesSuspension(t *testing.T) {
@@ -1251,13 +1235,12 @@ func TestRaceSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 			return cb.Result()
 		})
 
-		// f2: succeeds via a step only after the suspension is observed.
-		f2 := Go(ctx, "terminal", func(childCtx Context) (string, error) {
+		// f2: succeeds only after the suspension is observed.
+		f2 := newFuture[string]()
+		go func() {
 			<-suspendObserved
-			return Step(childCtx, "t-step", func(_ StepContext) (string, error) {
-				return "terminal-result", nil
-			})
-		})
+			f2.settle("terminal-result", nil)
+		}()
 
 		// f3: fails with a real error only after the suspension is
 		// observed.
@@ -1281,9 +1264,6 @@ func TestRaceSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 	}
 	// Every future's outcome was observed before Race returned.
 	assertDrainedOutcomes(t, <-outcomesCh, 3)
-	// The drain let the terminal branch finish its step before Race
-	// returned.
-	assertStepCheckpointed(t, fake, "t-step")
 }
 
 // TestAnyPendingCallbackLoserDoesNotForcePending verifies that a pending

@@ -224,12 +224,13 @@ func handler(ctx durable.Context, _ any) (string, error) {
 }
 ```
 
-`Future.Result` blocks until the future settles. Await several futures with
-a combinator, not with a sequence of `Result` calls. When the first future
-suspends, `Result` returns the suspension signal and the handler returns
-before the other branches reach a checkpoint. The combinators await every
-future first and propagate the suspension afterwards. The
-[combinators](#combinators) section shows them.
+`Future.Result` blocks until the future settles. It returns the suspension
+signal only when the invocation suspends, which happens once every branch
+is blocked. Await several futures with a combinator, not with a sequence of
+`Result` calls. A sequence that returns on the first error leaves the other
+futures unawaited. The combinators await every future and record the
+combined outcome as one operation. The [combinators](#combinators) section
+shows them.
 
 ### Errors
 
@@ -323,9 +324,11 @@ failure instead and consults the retry strategy.
 which makes 6 attempts in total, starting 5 seconds apart, doubling each
 time, capped at 60 seconds, with full jitter. `NoRetry()` fails on the first
 error. `NewRetryStrategy` builds a strategy from a `RetryConfig`, and
-`LinearBackoff` builds one with a constant increment. The execution suspends
-for the delay between attempts, so a retrying step does not hold the
-invocation open. `StepContext.Attempt()` is the 1-based attempt number.
+`LinearBackoff` builds one with a constant increment. When the next attempt
+becomes due while other work of the handler is still running, it runs in
+the same invocation. When nothing else can make progress, the invocation
+ends for the delay, so a retrying step does not hold the invocation open.
+`StepContext.Attempt()` is the 1-based attempt number.
 
 ```go
 func handler(ctx durable.Context, _ any) (string, error) {
@@ -355,9 +358,11 @@ attempt.
 
 ### Wait
 
-`Wait` suspends the execution for a duration. The invocation ends, and the
-service invokes the function again when the duration elapses. On replay a
-completed wait returns at once.
+`Wait` pauses the execution for a duration. The invocation ends only when
+no other work of the handler can make progress, and the service invokes the
+function again when the duration elapses. A wait that elapses while other
+work runs returns in the same invocation. On replay a completed wait
+returns at once.
 
 ```go
 func handler(ctx durable.Context, _ any) (string, error) {
@@ -374,8 +379,10 @@ outcome.
 ### Invoke
 
 `Invoke` starts another durable function as its own execution and returns
-its result. The calling execution suspends after starting it and resumes
-when it completes. The output type parameter comes first, so it can be
+its result. When the invoked function completes while other work of the
+calling handler is still running, `Invoke` returns in the same invocation.
+When nothing else can make progress, the calling invocation ends and the
+execution resumes when the invoked function completes. The output type parameter comes first, so it can be
 written out while the input type is inferred. The target needs a version or
 alias qualifier, such as `:$LATEST`. If the invoked function fails, `Invoke`
 returns a `*durable.InvokeError`.
@@ -390,8 +397,10 @@ func handler(ctx durable.Context, orderID string) (string, error) {
 
 `WaitForCondition` runs a check repeatedly. The check receives the state
 from the previous attempt and returns the new state. The SDK checkpoints
-the state between attempts and suspends for the delay the wait strategy
-returns. The strategy receives the new state and the attempt number. It
+the state between attempts and waits for the delay the wait strategy
+returns. When the next check becomes due while other work of the handler is
+still running, it runs in the same invocation. When nothing else can make
+progress, the invocation ends for the delay. The strategy receives the new state and the attempt number. It
 returns `Continue: true` with a `Delay` to poll again, `Continue: false` to
 stop with the state, or an `Err` to fail the operation.
 

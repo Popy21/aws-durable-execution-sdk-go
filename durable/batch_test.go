@@ -2069,6 +2069,34 @@ func TestConcurrentAbandonedWaitDoesNotForcePending(t *testing.T) {
 // branch does not succeed until the nested branch has committed, so the
 // outer completion decision always happens after the nested commitment
 // exists.
+// awaitParkedWaits blocks until n goroutines are parked on operations of
+// the invocation that ctx belongs to.
+func awaitParkedWaits(t *testing.T, ctx Context, n int) {
+	t.Helper()
+	ec, ok := ctx.(*execContext)
+	if !ok {
+		t.Fatalf("ctx is %T, want *execContext", ctx)
+	}
+	s := ec.suspend
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		got := 0
+		for _, w := range s.watches {
+			got += len(w.waiters)
+		}
+		s.mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("%d goroutines parked on operations, want %d", got, n)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestNestedAbandonedWaitDoesNotForcePending(t *testing.T) {
 	fake := &fakeLambda{}
 	type result struct {
@@ -2076,7 +2104,6 @@ func TestNestedAbandonedWaitDoesNotForcePending(t *testing.T) {
 		Total   int    `json:"totalCount"`
 		Reason  string `json:"reason"`
 	}
-	nestedCommitted := make(chan struct{})
 	resp := invokeBatch(t, fake, batchPayload(`null`), func(ctx Context, _ any) (result, error) {
 		br, err := Map(ctx, "outer", []int{0, 1},
 			func(c Context, _ int, index int) (string, error) {
@@ -2090,15 +2117,14 @@ func TestNestedAbandonedWaitDoesNotForcePending(t *testing.T) {
 							}
 							return "waited", nil
 						})
-					// The nested commitments now exist. Release the fast
-					// branch so the completion decision follows them.
-					close(nestedCommitted)
 					if nerr != nil {
 						return "", nerr
 					}
 					return "nested", nil
 				}
-				<-nestedCommitted
+				// Return only once both nested waits are parked, so the
+				// completion decision follows them.
+				awaitParkedWaits(t, c, 2)
 				return "fast", nil
 			}, WithCompletion(CompletionConfig{MinSuccessful: 1}))
 		if err != nil {

@@ -2,6 +2,7 @@ package durable
 
 import (
 	"errors"
+	"slices"
 )
 
 // All records a combinator operation and waits for every future to succeed,
@@ -106,9 +107,10 @@ func Join(ctx Context, name string, fs []Awaitable, opts ...ChildOption) error {
 // observed, without awaiting the remaining futures. Without failFast, the
 // remaining futures are awaited first.
 //
-// Deferred-suspension futures (pending callbacks) commit the invocation to
-// PENDING when first awaited, so awaiting one in order is the suspension
-// case above.
+// Each future is awaited with [Future.Result], which parks the goroutine.
+// A future whose operation finishes in this invocation settles with its
+// outcome; the suspension sentinel arrives only when the invocation
+// suspends.
 func awaitBarrier(fs []Awaitable, failFast bool) error {
 	var firstErr error
 	var sawSuspend bool
@@ -198,81 +200,55 @@ func Any[O any](ctx Context, name string, fs []*Future[O], opts ...ChildOption) 
 			return zero, &CombinatorError{Name: name, Errors: nil}
 		}
 
-		// Use a goroutine per future to detect the first success.
-		// All futures are already durable (their operations were
-		// claimed before the combinator), so this is a pure in-process
-		// join — no new durable operations are created.
-		//
-		// stop is closed when Any returns. A receive goroutine whose
-		// future has not settled by then exits instead of waiting for
-		// it: a losing future may never settle in this invocation, and
-		// the goroutine must not outlive the combinator that started
-		// it.
-		//
-		// Deferred-suspension futures (pending callbacks) cannot settle
-		// with a terminal outcome in this invocation, so they cannot
-		// win; awaiting one commits the invocation to PENDING. They are
-		// set aside and awaited only below, once suspension is the only
-		// possible aggregate outcome, so a losing pending callback
-		// never overrides a terminal winner.
-		type result struct {
-			val O
-			err error
-			idx int
+		// The futures are awaited together on this goroutine: it parks
+		// until one of the outstanding futures settles, then reads every
+		// settled one in input order. All futures are already durable
+		// (their operations were claimed before the combinator), so this
+		// is a pure in-process join and no new durable operations are
+		// created. A pending callback starts being watched here.
+		for _, f := range fs {
+			f.activate()
 		}
-		ch := make(chan result, len(fs))
-		stop := make(chan struct{})
-		defer close(stop)
-		var deferred []*Future[O]
-		joined := 0
-		for i, f := range fs {
-			if f.deferredSuspension {
-				deferred = append(deferred, f)
-				continue
-			}
-			joined++
-			go func(idx int, fut *Future[O]) {
-				val, err, ok := fut.resultOrStop(stop)
-				if !ok {
-					return
-				}
-				// ch has room for every future, so this never blocks.
-				ch <- result{val: val, err: err, idx: idx}
-			}(i, f)
-		}
-
 		observe := combinatorObserver(childCtx)
 		errs := make([]error, len(fs))
 		var sawSuspend bool
-		for range joined {
-			r := <-ch
-			observe(r.err)
-			switch {
-			case r.err == nil:
-				if !sawSuspend {
-					return r.val, nil
-				}
-				// A success after a suspension is discarded: the loop
-				// keeps draining so every branch reaches a blocking
-				// point, and the suspension propagates below. On the
-				// resume invocation the futures replay and the success
-				// is returned then.
-			case errors.Is(r.err, errSuspendExecution):
-				sawSuspend = true
-			default:
-				errs[r.idx] = r.err
-			}
+		pending := slices.Clone(fs)
+		idx := make([]int, len(fs))
+		for i := range idx {
+			idx[i] = i
 		}
-		if !sawSuspend && len(deferred) == 0 {
+		for len(pending) > 0 {
+			awaitAnySettled(pending)
+			keptF, keptI := pending[:0], idx[:0]
+			for j, f := range pending {
+				if !f.isDone() {
+					keptF, keptI = append(keptF, f), append(keptI, idx[j])
+					continue
+				}
+				val, err := f.value, f.err
+				observe(err)
+				switch {
+				case err == nil:
+					if !sawSuspend {
+						return val, nil
+					}
+					// A success after a suspension is discarded: the
+					// loop keeps draining so every branch reaches a
+					// blocking point, and the suspension propagates
+					// below. On the resume invocation the futures
+					// replay and the success is returned then.
+				case errors.Is(err, errSuspendExecution):
+					sawSuspend = true
+				default:
+					errs[idx[j]] = err
+				}
+			}
+			pending, idx = keptF, keptI
+		}
+		if !sawSuspend {
 			// All failed.
 			return zero, &CombinatorError{Name: name, Errors: errs}
 		}
-		// Suspension is the decided outcome: either a branch suspended,
-		// or the only unsettled futures are pending callbacks that
-		// resolve on a later invocation. Awaiting the deferred futures
-		// now records the pending commitment and marks their contexts
-		// blocked.
-		awaitDeferred(deferred)
 		return zero, errSuspendExecution
 	}, opts...)
 }
@@ -311,66 +287,37 @@ func Race[O any](ctx Context, name string, fs []*Future[O], opts ...ChildOption)
 			return zero, errSuspendExecution
 		}
 
-		// Use a goroutine per future to detect the first settlement.
-		// stop is closed when Race returns so a receive goroutine whose
-		// future has not settled by then exits instead of waiting for
-		// it (see Any).
-		//
-		// Deferred-suspension futures (pending callbacks) cannot settle
-		// with a terminal outcome in this invocation, so they cannot
-		// win; awaiting one commits the invocation to PENDING. They are
-		// set aside and awaited only below, once suspension is the only
-		// possible aggregate outcome, so a losing pending callback
-		// never overrides a terminal winner.
-		type result struct {
-			val O
-			err error
-		}
-		ch := make(chan result, len(fs))
-		stop := make(chan struct{})
-		defer close(stop)
-		var deferred []*Future[O]
-		joined := 0
+		// The futures are awaited together on this goroutine; see Any.
 		for _, f := range fs {
-			if f.deferredSuspension {
-				deferred = append(deferred, f)
-				continue
-			}
-			joined++
-			go func(fut *Future[O]) {
-				val, err, ok := fut.resultOrStop(stop)
-				if !ok {
-					return
-				}
-				// ch has room for every future, so this never blocks.
-				ch <- result{val: val, err: err}
-			}(f)
+			f.activate()
 		}
-
 		observe := combinatorObserver(childCtx)
 		var sawSuspend bool
-		for range joined {
-			r := <-ch
-			observe(r.err)
-			if r.err != nil && errors.Is(r.err, errSuspendExecution) {
-				sawSuspend = true
-				continue
+		pending := slices.Clone(fs)
+		for len(pending) > 0 {
+			awaitAnySettled(pending)
+			kept := pending[:0]
+			for _, f := range pending {
+				if !f.isDone() {
+					kept = append(kept, f)
+					continue
+				}
+				observe(f.err)
+				if f.err != nil && errors.Is(f.err, errSuspendExecution) {
+					sawSuspend = true
+					continue
+				}
+				if !sawSuspend {
+					return f.value, f.err
+				}
+				// A terminal outcome after a suspension is discarded:
+				// the loop keeps draining so every branch reaches a
+				// blocking point, and the suspension propagates below.
+				// On the resume invocation the futures replay and the
+				// terminal outcome is returned then.
 			}
-			if !sawSuspend {
-				return r.val, r.err
-			}
-			// A terminal outcome after a suspension is discarded: the
-			// loop keeps draining so every branch reaches a blocking
-			// point, and the suspension propagates below. On the resume
-			// invocation the futures replay and the terminal outcome is
-			// returned then.
+			pending = kept
 		}
-		// Suspension is the decided outcome: every joined branch
-		// suspended, and any remaining futures are pending callbacks
-		// that resolve on a later invocation. Awaiting the deferred
-		// futures now records the pending commitment and marks their
-		// contexts blocked.
-		awaitDeferred(deferred)
 		return zero, errSuspendExecution
 	}, opts...)
 }
@@ -384,17 +331,4 @@ func combinatorObserver(ctx Context) func(err error) {
 		return ec.combinatorObserve
 	}
 	return func(error) {}
-}
-
-// awaitDeferred awaits deferred-suspension futures (pending callbacks) on
-// behalf of a combinator. Called only once suspension is the combinator's
-// decided outcome, so the pending commitment made by each future's first
-// Result call can no longer override a terminal winner. Every deferred
-// future settles with the suspension sentinel by construction; the
-// outcomes are discarded because the caller propagates the suspension
-// itself.
-func awaitDeferred[O any](fs []*Future[O]) {
-	for _, f := range fs {
-		_, _ = f.Result()
-	}
 }

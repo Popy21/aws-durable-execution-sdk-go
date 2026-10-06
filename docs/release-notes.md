@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+### Changed: an operation that finishes during the invocation resumes it
+
+An awaited operation that finishes while the same invocation is still
+running now resumes the goroutine that awaits it. Before, the SDK ended
+the invocation with `PENDING` as soon as a handler blocked on a wait, a
+callback, a chained invoke, a step retry, or a condition check. The
+service rejects a `PENDING` response when nothing is pending, so a
+handler whose awaited operation finished while another step ran failed
+the invocation, and four such invocations in a row failed the execution.
+
+The rules are now these:
+
+- A checkpoint response that reports an awaited wait, callback, or invoke
+  terminal resumes the goroutine blocked on it with the operation's
+  outcome: the value, or the error a replay of the same record returns.
+  That includes an invoke whose START response reports that it failed.
+- A response that reports a step retry or a condition check `READY` runs
+  its next attempt in the same invocation.
+- The invocation returns `PENDING` only when every goroutine that runs
+  handler code is blocked on an operation or has returned, no checkpoint
+  request is queued or in flight, no step attempt, condition check, or
+  child-context completion is executing, and at least one blocked
+  operation is still not finished. The SDK checks again after a 20 ms
+  settle period and returns `PENDING` only if all of that still holds.
+- An operation that is not terminal in the initial execution state follows
+  the same rules.
+- `OnOperationEnd` is dispatched once, in the invocation that observes the
+  completion.
+- A `Step` under `AtMostOncePerRetry` whose previous attempt was
+  interrupted dispatches a replayed `OnOperationStart`, and
+  `OnOperationEnd` once it records the terminal failure. Before, it
+  dispatched neither.
+
+While a goroutine is blocked on an operation that is not finished, the SDK
+polls its status with a `CheckpointDurableExecution` request that carries
+no updates:
+
+- The first poll is at the operation's end time: the scheduled end of a
+  wait, and the next attempt time of a step retry or a condition check. A
+  callback and an invoke have no end time, so their first poll is 1 s
+  after the goroutine blocks.
+- After the n-th poll that finds no change, the next poll is min(n, 10)
+  seconds later while n is at most 95, and 60 s later from n = 96 on.
+- No poll is scheduled to fire less than 1 s before the invocation
+  deadline, and polling stops once less than 1 s remains.
+- A status change in any checkpoint response cancels the operation's
+  pending poll.
+- A handler that only awaits one operation, with nothing else running,
+  suspends after the settle period and sends no poll.
+
+A poll counts as a checkpoint call for
+`durabletest.LocalRunner.OmitTokenOnCheckpoint`.
+
 ### Breaking: `durabletest` runners return an error instead of taking `*testing.T`
 
 The runner methods no longer take a `*testing.T`. They return the result

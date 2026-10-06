@@ -39,10 +39,13 @@ type invokeOptionFunc func(*invokeOptions)
 func (f invokeOptionFunc) applyInvoke(o *invokeOptions) { f(o) }
 
 // Invoke durably invokes another Lambda function and returns its result.
-// The invoked function runs as its own durable execution: the calling
-// execution suspends after starting it and resumes when it completes. The
-// output type parameter is specified by the caller and the input type is
-// inferred:
+// The invoked function runs as its own durable execution. When it finishes
+// while other work of the calling handler is still running, Invoke returns
+// in the same invocation; the SDK polls its status from one second after
+// Invoke blocks. When nothing else can make progress, the calling
+// invocation ends and the execution resumes when the invoked function
+// completes. The output type parameter is specified by the caller and the
+// input type is inferred:
 //
 //	receipt, err := durable.Invoke[Receipt](ctx, "charge", paymentFnArn, order)
 //
@@ -77,9 +80,10 @@ func Invoke[O, I any](ctx Context, name, functionID string, input I, opts ...Inv
 //
 // The operation's identity is claimed before InvokeAsync returns, so
 // consecutive InvokeAsync calls from one goroutine are
-// replay-deterministic. On invocation suspension, the returned future is
-// settled with errSuspendExecution so goroutines blocked on [Future.Result]
-// unwind.
+// replay-deterministic. The future settles when the invoked function
+// finishes, in the invocation that observes it. On invocation suspension,
+// the returned future is settled with errSuspendExecution so goroutines
+// blocked on [Future.Result] unwind.
 func InvokeAsync[O, I any](ctx Context, name, functionID string, input I, opts ...InvokeOption) *Future[O] {
 	ec, ok := ctx.(*execContext)
 	if !ok {
@@ -122,13 +126,20 @@ func InvokeAsync[O, I any](ctx Context, name, functionID string, input I, opts .
 // runInvoke performs the invoke logic for a previously-claimed operation ID.
 // It is shared by both the blocking [Invoke] and the async [InvokeAsync].
 //
+// After its START checkpoint, or when it is replayed while the invoked
+// execution is unsettled, the invoke parks the goroutine until a checkpoint
+// response or a poll reports it terminal, then returns the outcome a
+// replay of that record returns. That includes a START response that
+// already reports the invoke failed.
+//
 // Operation lifecycle hooks: an invoke dispatches at most one start and at
 // most one end per invocation. A live invoke dispatches a start after its
-// START checkpoint and then suspends, with no end. An invoke replayed while
-// the invoked execution is unsettled dispatches a replayed start and
-// suspends. An invoke replayed with a terminal status dispatches only a
-// replayed end with the checkpointed timestamps and outcome: its start was
-// dispatched by the invocation that recorded it.
+// START checkpoint. An invoke replayed while the invoked execution is
+// unsettled dispatches a replayed start. Either then dispatches a live end
+// in the invocation that observes the terminal record, or no end when the
+// invocation suspends first. An invoke replayed with a terminal status
+// dispatches only a replayed end with the checkpointed timestamps and
+// outcome: its start was dispatched by the invocation that recorded it.
 func runInvoke[O, I any](ec *execContext, id, name, functionID string, input I, options invokeOptions) (O, error) {
 	var zero O
 
@@ -143,37 +154,15 @@ func runInvoke[O, I any](ec *execContext, id, name, functionID string, input I, 
 		info := ec.operationHookInfo(id, name, string(OperationTypeChainedInvoke), OperationSubTypeChainedInvoke, true)
 		info.StartTimestamp = op.startTimestamp
 		switch op.status {
-		case statusSucceeded:
-			if op.invoke == nil {
-				return zero, fmt.Errorf("durable: invoke %q: checkpointed %s operation has no invoke details", name, op.status)
-			}
-			// The invoke reached its terminal state when the checkpoint
-			// recorded it, so its end is dispatched before the result is
-			// deserialized: a failing result Serdes does not suppress it.
-			info.Result = op.invoke.result
-			info.EndTimestamp = op.endTimestamp
-			dispatchOperationEnd(ec, info, PluginOperationSucceeded)
-			var out O
-			if err := options.resultSerdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.invoke.result), &out); err != nil {
-				return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
-			}
-			return out, nil
-
-		case statusFailed, statusTimedOut, statusStopped, statusCancelled:
-			invErr := invokeErrorFromCheckpoint(name, functionID, op)
-			info.Error = invErr.Err
-			info.EndTimestamp = op.endTimestamp
-			dispatchOperationEnd(ec, info, toPluginOperationStatus(op.status))
-			return zero, invErr
+		case statusSucceeded, statusFailed, statusTimedOut, statusStopped, statusCancelled:
+			return invokeOutcome[O](ec, op, id, name, functionID, options, info)
 
 		case statusStarted, statusPending, statusReady:
 			// The invoked execution has not settled: the start is
 			// replayed and the end belongs to the invocation that
 			// observes the outcome. Keep waiting.
 			dispatchOperationStart(ec, info, toPluginOperationStatus(op.status))
-			ec.blocked.Store(true)
-			ec.suspend.commitPending(ec.abandon)
-			return zero, errSuspendExecution
+			return awaitInvoke[O](ec, id, name, functionID, options, info)
 		}
 	}
 
@@ -219,11 +208,50 @@ func runInvoke[O, I any](ec *execContext, id, name, functionID string, input I, 
 	info.StartTimestamp = checkpointedStartTime(ec.state.get(id))
 	dispatchOperationStart(ec, info, PluginOperationStarted)
 
-	// The invoked function runs as its own durable execution: suspend and
-	// resume when it settles.
-	ec.blocked.Store(true)
-	ec.suspend.commitPending(ec.abandon)
-	return zero, errSuspendExecution
+	// The invoked function runs as its own durable execution: wait until a
+	// checkpoint response or a poll reports it settled.
+	return awaitInvoke[O](ec, id, name, functionID, options, info)
+}
+
+// awaitInvoke parks the goroutine until the invoke id is reported
+// terminal, then returns its outcome with a live end. info is the hook info
+// of the invoke's start.
+func awaitInvoke[O any](ec *execContext, id, name, functionID string, options invokeOptions, info OperationHookInfo) (O, error) {
+	op, err := ec.awaitOperation(id, terminalRecord, noEndTime)
+	if err != nil {
+		var zero O
+		return zero, err
+	}
+	info.IsReplay = false
+	info.EndTimestamp = checkpointedEndTime(op)
+	return invokeOutcome[O](ec, op, id, name, functionID, options, info)
+}
+
+// invokeOutcome returns the outcome of the invoke whose record op is
+// terminal and dispatches its end with info. The end is dispatched before
+// the result is deserialized, so a failing result Serdes does not suppress
+// it.
+func invokeOutcome[O any](ec *execContext, op *operation, id, name, functionID string, options invokeOptions, info OperationHookInfo) (O, error) {
+	var zero O
+	if info.EndTimestamp.IsZero() {
+		info.EndTimestamp = op.endTimestamp
+	}
+	if op.status != statusSucceeded {
+		invErr := invokeErrorFromCheckpoint(name, functionID, op)
+		info.Error = invErr.Err
+		dispatchOperationEnd(ec, info, toPluginOperationStatus(op.status))
+		return zero, invErr
+	}
+	if op.invoke == nil {
+		return zero, fmt.Errorf("durable: invoke %q: checkpointed %s operation has no invoke details", name, op.status)
+	}
+	info.Result = op.invoke.result
+	dispatchOperationEnd(ec, info, PluginOperationSucceeded)
+	var out O
+	if err := options.resultSerdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.invoke.result), &out); err != nil {
+		return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+	}
+	return out, nil
 }
 
 // invokeErrorFromCheckpoint reconstructs the failure of a settled invoke

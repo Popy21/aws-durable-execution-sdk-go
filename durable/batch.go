@@ -1129,6 +1129,11 @@ func executeBatchItems[I, O any](
 		abandon := newAbandonHandle(ec.abandon)
 		outcomeCh := make(chan itemOutcome, totalItems)
 		var wg sync.WaitGroup
+		// coordinator counts this goroutine as parked while it waits for
+		// an item outcome. A worker signals it before sending one, and the
+		// coordinator is never counted as parked while an outcome it has
+		// not received is signaled.
+		coordinator := ec.suspend.newParker()
 
 		accepted := make(map[int]BatchItem[O], totalItems)
 		startedIdx := make(map[int]struct{}, totalItems)
@@ -1183,6 +1188,7 @@ func executeBatchItems[I, O any](
 						}()
 						item, runErr = runPreClaimedBatchItem[O](ec, parentID, pc.childID, pc.name, pc.index, pc.op, pc.terminal, options, childSubType, runItem, abandon, tok)
 					}()
+					coordinator.signal()
 					if runErr != nil {
 						outcomeCh <- itemOutcome{index: pc.index, err: runErr}
 						return
@@ -1197,7 +1203,9 @@ func executeBatchItems[I, O any](
 		var fatalErr error
 		sawSuspend := false
 		for inFlight > 0 {
+			coordinator.park()
 			out := <-outcomeCh
+			coordinator.received()
 			inFlight--
 			switch {
 			case out.err != nil:
@@ -1241,8 +1249,10 @@ func executeBatchItems[I, O any](
 				if reasonLocked {
 					// Stop awaiting the branches still in flight: they
 					// unwind at their next operation without starting new
-					// work.
+					// work, and a branch parked on an operation resumes
+					// with the suspension sentinel.
 					abandon.abandon()
+					ec.suspend.wakeAbandoned()
 				}
 			}
 			if fatalErr == nil {
@@ -1256,11 +1266,12 @@ func executeBatchItems[I, O any](
 		// retireCommitment for how its commitment is handled.
 		wg.Wait()
 
-		// A branch abandoned after early completion may have already
-		// committed the invocation to PENDING (a wait, invoke, callback
-		// or retry that suspended before the completion decision fired).
+		// A branch abandoned after early completion may have committed
+		// the invocation to PENDING before the completion decision fired.
 		// Now that every worker has drained, retire those commitments so
 		// abandoned work does not force the whole invocation to PENDING.
+		// Abandoned branches parked on an operation were resumed by
+		// wakeAbandoned when the batch abandoned them.
 		// A commitment made after this point by any context under this
 		// handle, including a durable.Go branch that outlives the workers
 		// and any batch it starts, is dropped by commitPending because

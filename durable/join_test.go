@@ -120,13 +120,12 @@ func TestJoinAwaitsAllAfterError(t *testing.T) {
 }
 
 // TestJoinDrainsSuspendedThenFailing verifies the drain contract shared
-// with All. f1 suspends on a pending callback. f2 is released only when
-// Join attempts to await it, then runs a step and fails. The step can only
-// be checkpointed if Join drained past f1's suspension to f2, and the
-// suspension is propagated in preference to f2's failure.
+// with All. f1 suspends on a pending callback. f2 runs a step and fails;
+// the invocation suspends only after that, since a branch that can make
+// progress holds the suspension. Join awaits past f1's suspension to f2,
+// and the suspension is propagated in preference to f2's failure.
 func TestJoinDrainsSuspendedThenFailing(t *testing.T) {
 	fake := &fakeLambda{}
-	gate := make(chan struct{})
 	errCh := make(chan error, 1)
 
 	resp := invokeStep(t, fake, stepPayload(`"x"`), func(ctx Context, _ string) (string, error) {
@@ -138,7 +137,6 @@ func TestJoinDrainsSuspendedThenFailing(t *testing.T) {
 			return cb.Result()
 		})
 		f2 := Go(ctx, "failer", func(childCtx Context) (int, error) {
-			<-gate
 			if _, err := Step(childCtx, "trailing-step", func(StepContext) (int, error) {
 				return 1, nil
 			}); err != nil {
@@ -146,8 +144,6 @@ func TestJoinDrainsSuspendedThenFailing(t *testing.T) {
 			}
 			return 0, errors.New("failer-failed")
 		})
-		f2.preResult = func() { close(gate) }
-
 		err := Join(ctx, "settle", []Awaitable{f1, f2})
 		errCh <- err
 		return "", err

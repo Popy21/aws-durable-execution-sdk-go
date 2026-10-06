@@ -109,6 +109,7 @@ type Operation struct {
 	EndTimestamp         Timestamp             `json:"EndTimestamp,omitempty"`
 	ExecutionDetails     *ExecutionDetails     `json:"ExecutionDetails,omitempty"`
 	StepDetails          *StepDetails          `json:"StepDetails,omitempty"`
+	WaitDetails          *WaitDetails          `json:"WaitDetails,omitempty"`
 	ChainedInvokeDetails *ChainedInvokeDetails `json:"ChainedInvokeDetails,omitempty"`
 	ContextDetails       *ContextDetails       `json:"ContextDetails,omitempty"`
 	CallbackDetails      *CallbackDetails      `json:"CallbackDetails,omitempty"`
@@ -121,13 +122,19 @@ type ExecutionDetails struct {
 }
 
 // StepDetails carries a step operation's checkpointed attempt state.
-// NextAttemptTimestamp is deliberately not decoded: the engine never
-// consumes it (the service owns the retry timer), and its numeric wire
-// encoding does not fit time.Time.
+// NextAttemptTimestamp is when the next attempt of a pending retry or
+// condition check is due; the SDK sends its first status poll then.
 type StepDetails struct {
-	Attempt int          `json:"Attempt,omitempty"`
-	Result  string       `json:"Result,omitempty"`
-	Error   *ErrorObject `json:"Error,omitempty"`
+	Attempt              int          `json:"Attempt,omitempty"`
+	Result               string       `json:"Result,omitempty"`
+	Error                *ErrorObject `json:"Error,omitempty"`
+	NextAttemptTimestamp *Timestamp   `json:"NextAttemptTimestamp,omitempty"`
+}
+
+// WaitDetails carries a wait operation's scheduled end. The SDK sends its
+// first status poll of a pending wait then.
+type WaitDetails struct {
+	ScheduledEndTimestamp *Timestamp `json:"ScheduledEndTimestamp,omitempty"`
 }
 
 // ChainedInvokeDetails carries a chained invoke's checkpointed outcome.

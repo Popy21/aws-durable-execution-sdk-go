@@ -3,6 +3,7 @@ package durable
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // selectOutcome is the checkpointed result of a [Select] operation: the
@@ -61,59 +62,49 @@ func Select[O any](ctx Context, name string, branches []Branch[O], opts ...Child
 	out, err := RunInChildContext(ctx, name, func(childCtx Context) (selectOutcome[O], error) {
 		var none selectOutcome[O]
 
-		// Every branch runs in its own child context. The futures are
-		// created here, so none is a deferred-suspension callback future;
-		// a callback awaited inside a branch surfaces as that branch's
-		// suspension.
+		// Every branch runs in its own child context.
 		fs := make([]*Future[O], len(branches))
 		for i, b := range branches {
 			fs[i] = Go(childCtx, b.Name, b.Func)
 		}
 
-		// One receive goroutine per branch detects the first settlement.
-		// stop is closed when Select returns so a receive goroutine whose
-		// future has not settled by then exits instead of waiting for it
-		// (see Race).
-		type result struct {
-			val O
-			err error
-			idx int
-		}
-		ch := make(chan result, len(fs))
-		stop := make(chan struct{})
-		defer close(stop)
-		for i, f := range fs {
-			go func(idx int, fut *Future[O]) {
-				val, err, ok := fut.resultOrStop(stop)
-				if !ok {
-					return
-				}
-				// ch has room for every future, so this never blocks.
-				ch <- result{val: val, err: err, idx: idx}
-			}(i, f)
-		}
-
+		// The branch futures are awaited together on this goroutine: it
+		// parks until one settles, then reads every settled one in branch
+		// order.
 		observe := combinatorObserver(childCtx)
 		var sawSuspend bool
-		for range fs {
-			r := <-ch
-			observe(r.err)
-			if r.err != nil && errors.Is(r.err, errSuspendExecution) {
-				sawSuspend = true
-				continue
-			}
-			if !sawSuspend {
-				outcome := Settled[O]{Value: r.val}
-				if r.err != nil {
-					outcome = Settled[O]{Err: r.err}
+		pending := slices.Clone(fs)
+		idx := make([]int, len(fs))
+		for i := range idx {
+			idx[i] = i
+		}
+		for len(pending) > 0 {
+			awaitAnySettled(pending)
+			keptF, keptI := pending[:0], idx[:0]
+			for j, f := range pending {
+				if !f.isDone() {
+					keptF, keptI = append(keptF, f), append(keptI, idx[j])
+					continue
 				}
-				return selectOutcome[O]{Winner: branches[r.idx].Name, Outcome: outcome}, nil
+				observe(f.err)
+				if f.err != nil && errors.Is(f.err, errSuspendExecution) {
+					sawSuspend = true
+					continue
+				}
+				if !sawSuspend {
+					outcome := Settled[O]{Value: f.value}
+					if f.err != nil {
+						outcome = Settled[O]{Err: f.err}
+					}
+					return selectOutcome[O]{Winner: branches[idx[j]].Name, Outcome: outcome}, nil
+				}
+				// A terminal outcome after a suspension is discarded: the
+				// loop keeps draining so every branch reaches a blocking
+				// point, and the suspension propagates below. On the
+				// resume invocation the branches replay and the terminal
+				// outcome is returned then.
 			}
-			// A terminal outcome after a suspension is discarded: the
-			// loop keeps draining so every branch reaches a blocking
-			// point, and the suspension propagates below. On the resume
-			// invocation the branches replay and the terminal outcome is
-			// returned then.
+			pending, idx = keptF, keptI
 		}
 		return none, errSuspendExecution
 	}, opts...)

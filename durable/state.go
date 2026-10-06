@@ -50,6 +50,10 @@ type operation struct {
 	startTimestamp time.Time
 	endTimestamp   time.Time
 
+	// scheduledEnd is when a wait completes, from its wait details. Zero
+	// when absent.
+	scheduledEnd time.Time
+
 	step     *stepDetails
 	invoke   *invokeDetails
 	childCtx *contextDetails
@@ -144,6 +148,10 @@ func (d *contextDetails) record() errorRecord {
 type stepDetails struct {
 	// attempt is the number of attempts already made.
 	attempt int
+
+	// nextAttempt is when the next attempt of a pending retry or
+	// condition check is due. Zero when absent.
+	nextAttempt time.Time
 
 	// result is the serialized step result. Set when the step succeeded.
 	result string

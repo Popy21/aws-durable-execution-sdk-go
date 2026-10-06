@@ -252,21 +252,19 @@ func TestSelectFastWinsWhileSiblingReachesBlockingPoint(t *testing.T) {
 	// One branch suspends on a wait and the other returns at once. The
 	// fast branch wins. The suspending branch is gated until Select has
 	// returned, so it demonstrably reaches its blocking point after the
-	// winner was decided: its wait START is checkpointed, and because a
-	// wait commits the invocation to PENDING, the invocation responds
-	// PENDING. The next invocation replays the checkpointed winner.
+	// winner was decided: its wait START is checkpointed. The handler then
+	// waits too, so no branch can make progress and the invocation
+	// responds PENDING. The next invocation replays the checkpointed
+	// winner.
 	fake := &fakeLambda{}
 	gate := make(chan struct{})
-	blocked := make(chan struct{})
 	reportCh := make(chan selectReport, 1)
 	resp := invokeStep(t, fake, childPayload(`"x"`), func(ctx Context, _ string) (string, error) {
 		winner, value, err := Select(ctx, "pick", []Branch[string]{
 			{Name: "fast", Func: func(Context) (string, error) { return "fast-result", nil }},
 			{Name: "suspender", Func: func(childCtx Context) (string, error) {
 				<-gate
-				werr := Wait(childCtx, "slow-wait", time.Minute)
-				close(blocked)
-				return "", werr
+				return "", Wait(childCtx, "slow-wait", time.Minute)
 			}},
 		})
 		report := selectReport{Winner: winner, Value: value}
@@ -275,7 +273,9 @@ func TestSelectFastWinsWhileSiblingReachesBlockingPoint(t *testing.T) {
 		}
 		reportCh <- report
 		close(gate)
-		<-blocked
+		if werr := Wait(ctx, "root-wait", time.Minute); werr != nil {
+			return "", werr
+		}
 		return value, nil
 	})
 
@@ -302,16 +302,16 @@ func TestSelectFastWinsWhileSiblingReachesBlockingPoint(t *testing.T) {
 }
 
 func TestSelectSuspendThenTerminalPropagatesSuspension(t *testing.T) {
-	// Once a suspension is observed, Select drains: the success and the
-	// failure that follow are observed but discarded, and the suspension
-	// propagates, matching Race. The interleaving is forced through the
-	// observation hook: the terminal branches proceed only after the
-	// receive loop has observed the suspension.
+	// Once a suspension is observed, Select drains, and the suspension
+	// propagates, matching Race. The invocation suspends only when no
+	// branch can make progress, so every branch is blocked by then and
+	// every outcome the drain observes is a suspension: one branch awaits
+	// a callback, one a wait, and one a callback after running a step.
 	fake := &fakeLambda{}
 	errCh := make(chan error, 1)
 	outcomesCh := make(chan []error, 1)
 	resp := invokeStep(t, fake, stepPayload(`"x"`), func(ctx Context, _ string) (string, error) {
-		suspendObserved, rec := setCombinatorObserve(t, ctx)
+		_, rec := setCombinatorObserve(t, ctx)
 
 		_, _, err := Select(ctx, "pick", []Branch[string]{
 			{Name: "suspender", Func: func(childCtx Context) (string, error) {
@@ -322,14 +322,19 @@ func TestSelectSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 				return cb.Result()
 			}},
 			{Name: "terminal", Func: func(childCtx Context) (string, error) {
-				<-suspendObserved
-				return Step(childCtx, "t-step", func(StepContext) (string, error) {
+				if _, err := Step(childCtx, "t-step", func(StepContext) (string, error) {
 					return "terminal-result", nil
-				})
+				}); err != nil {
+					return "", err
+				}
+				cb, err := CreateCallback[string](childCtx, "cb-after-step")
+				if err != nil {
+					return "", err
+				}
+				return cb.Result()
 			}},
-			{Name: "failing", Func: func(Context) (string, error) {
-				<-suspendObserved
-				return "", errors.New("late-failure")
+			{Name: "failing", Func: func(childCtx Context) (string, error) {
+				return "", Wait(childCtx, "w", time.Minute)
 			}},
 		})
 		outcomesCh <- rec.snapshot()
@@ -343,7 +348,15 @@ func TestSelectSuspendThenTerminalPropagatesSuspension(t *testing.T) {
 	if err := <-errCh; !errors.Is(err, errSuspendExecution) {
 		t.Errorf("Select error = %v, want errSuspendExecution", err)
 	}
-	assertDrainedOutcomes(t, <-outcomesCh, 3)
+	outcomes := <-outcomesCh
+	if len(outcomes) != 3 {
+		t.Fatalf("observed %d outcomes at return, want 3: %v", len(outcomes), outcomes)
+	}
+	for _, o := range outcomes {
+		if !errors.Is(o, errSuspendExecution) {
+			t.Errorf("observed outcome %v, want errSuspendExecution", o)
+		}
+	}
 	assertStepCheckpointed(t, fake, "t-step")
 }
 

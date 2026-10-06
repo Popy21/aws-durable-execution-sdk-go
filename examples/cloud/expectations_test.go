@@ -159,24 +159,12 @@ func TestExpectationAssert(t *testing.T) {
 	}
 }
 
-func TestCheckForceCheckpointStepRetry(t *testing.T) {
-	good := `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"retrying\",\"Status\":2,\"Result\":null,\"Err\":{\"Name\":\"retrying\",\"ErrorType\":\"StepError\",\"Message\":\"m\"}}],\"Reason\":1}"`
-	if failed, msg := probe(func(tb testing.TB) { checkForceCheckpointStepRetry(tb, good) }); failed {
-		t.Errorf("a well-formed result must pass: %s", msg)
-	}
-	bad := strings.Replace(good, "StepError", "Error", 1)
-	if failed, _ := probe(func(tb testing.TB) { checkForceCheckpointStepRetry(tb, bad) }); !failed {
-		t.Error("a differing error type must fail")
-	}
-}
-
 // TestExpectationChecksAcceptObservedResults runs every predicate-based
 // expectation against a result of the shape the example produces, so a
 // predicate that rejects the real result is caught before a cloud run.
 func TestExpectationChecksAcceptObservedResults(t *testing.T) {
 	samples := map[string]string{
 		"concurrent-callback-wait":            `{"elapsedMs":1263}`,
-		"force-checkpoint-step-retry":         `"{\"Items\":[{\"Index\":0,\"Name\":\"long-running\",\"Status\":1,\"Result\":\"long-complete\",\"Err\":null},{\"Index\":1,\"Name\":\"retrying\",\"Status\":2,\"Result\":null,\"Err\":{\"Name\":\"retrying\",\"ErrorType\":\"StepError\",\"Message\":\"m\",\"StackTrace\":[\"frame\"]}}],\"Reason\":1}"`,
 		"future-any":                          `{"status":"succeeded","value":"first success"}`,
 		"future-race-wait":                    `{"elapsedMs":1182}`,
 		"map-completion-config-issue":         `{"totalItems":4,"successfulCount":2,"failedCount":0,"startedCount":2,"hasFailures":false,"batchStatus":"SUCCEEDED","completionReason":"MIN_SUCCESSFUL_REACHED","successfulItems":[{"index":0,"itemId":1},{"index":2,"itemId":3}],"failedItems":null}`,

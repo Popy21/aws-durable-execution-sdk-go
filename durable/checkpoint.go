@@ -112,6 +112,34 @@ type checkpointer struct {
 	// (e.g. CallbackId lookup after checkpointing START) reflect
 	// backend-assigned fields. Set during invocation wiring.
 	state *executionState
+
+	// outstanding counts the requests queued or in flight: incremented
+	// when a request is queued and decremented when its outcome is
+	// delivered. The invocation does not suspend while it is above zero.
+	outstanding atomic.Int64
+
+	// suspend, when non-nil, is told about every queued and settled
+	// request and is given the records of every checkpoint response, so
+	// that a response reporting an awaited operation finished resumes the
+	// goroutine parked on it. Set during invocation wiring.
+	suspend *suspendSignal
+}
+
+// busy reports whether a checkpoint request is queued or in flight.
+func (cp *checkpointer) busy() bool {
+	return cp.outstanding.Load() > 0
+}
+
+// deliver hands a request its outcome and, when no request remains queued
+// or in flight, lets the suspension conditions be checked again.
+func (cp *checkpointer) deliver(p *pendingCheckpoint, err error) {
+	p.done <- err
+	if cp.outstanding.Add(-1) == 0 && cp.suspend != nil {
+		if len(p.updates) > 0 {
+			cp.suspend.touch()
+		}
+		cp.suspend.maybeSuspend()
+	}
 }
 
 func newCheckpointer(client ExecutionClient, executionArn, initialToken string) *checkpointer {
@@ -255,6 +283,15 @@ func (cp *checkpointer) enqueue(ctx context.Context, updates []OperationUpdate, 
 		final:   final,
 	}
 
+	// A poll (a request with no updates) changes nothing the suspension
+	// conditions depend on unless its response reports a change, which
+	// the watches account for, so only a request with updates advances
+	// the generation. Any request, poll or not, holds the suspension
+	// while it is queued or in flight.
+	cp.outstanding.Add(1)
+	if cp.suspend != nil && len(updates) > 0 {
+		cp.suspend.touch()
+	}
 	cp.mu.Lock()
 	cp.queue = append(cp.queue, p)
 	start := !cp.flushing
@@ -298,7 +335,7 @@ func (cp *checkpointer) flush() {
 
 		err := cp.send(batch, token)
 		for _, p := range batch {
-			p.done <- err
+			cp.deliver(p, err)
 		}
 	}
 }
@@ -325,7 +362,7 @@ func (cp *checkpointer) takeBatchLocked() ([]*pendingCheckpoint, string) {
 	for consumed < len(cp.queue) {
 		p := cp.queue[consumed]
 		if err := p.ctx.Err(); err != nil {
-			p.done <- err
+			cp.deliver(p, err)
 			consumed++
 			continue
 		}
@@ -333,7 +370,7 @@ func (cp *checkpointer) takeBatchLocked() ([]*pendingCheckpoint, string) {
 			// Termination refuses queued branch requests without a call.
 			// A final request is always queued after terminate(), so a
 			// batch that carries one carries no branch request.
-			p.done <- errCheckpointTerminated
+			cp.deliver(p, errCheckpointTerminated)
 			consumed++
 			continue
 		}
@@ -425,14 +462,22 @@ func (cp *checkpointer) send(batch []*pendingCheckpoint, token string) error {
 		// subsequent reads (e.g. reading CallbackId after START) see
 		// backend-assigned fields. Done under mu to keep the lock order
 		// checkpointer.mu → executionState.mu that merge documents.
+		var merged []*operation
 		if cp.state != nil && out.NewExecutionState != nil {
-			ops := make([]*operation, 0, len(out.NewExecutionState))
+			merged = make([]*operation, 0, len(out.NewExecutionState))
 			for _, apiOp := range out.NewExecutionState {
-				ops = append(ops, operationFromAPI(apiOp))
+				merged = append(merged, operationFromAPI(apiOp))
 			}
-			cp.state.merge(ops)
+			cp.state.merge(merged)
 		}
 		cp.mu.Unlock()
+		// The records are matched against the watches after the merge,
+		// so a goroutine that starts awaiting an operation in between
+		// reads the merged record itself. A goroutine resumed here is
+		// unparked before the requests of this call learn their outcome.
+		if cp.suspend != nil && len(merged) > 0 {
+			cp.suspend.onStateMerged(merged)
+		}
 
 		// The API call succeeded. The service rotated the token, so the
 		// local token follows it above whatever happened meanwhile: the
@@ -520,12 +565,18 @@ func operationFromAPI(op Operation) *operation {
 			attempt: int(sd.Attempt),
 			result:  aws.ToString(sd.Result),
 		}
+		if sd.NextAttemptTimestamp != nil {
+			rec.step.nextAttempt = *sd.NextAttemptTimestamp
+		}
 		if sd.Error != nil {
 			rec.step.errType = aws.ToString(sd.Error.ErrorType)
 			rec.step.errMessage = aws.ToString(sd.Error.ErrorMessage)
 			rec.step.errData = aws.ToString(sd.Error.ErrorData)
 			rec.step.stackTrace = sd.Error.StackTrace
 		}
+	}
+	if wd := op.WaitDetails; wd != nil && wd.ScheduledEndTimestamp != nil {
+		rec.scheduledEnd = *wd.ScheduledEndTimestamp
 	}
 	if id := op.ChainedInvokeDetails; id != nil {
 		rec.invoke = &invokeDetails{result: aws.ToString(id.Result)}

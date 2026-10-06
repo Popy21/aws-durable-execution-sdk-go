@@ -18,11 +18,14 @@ func defaultConditionWaitStrategy[S any]() WaitStrategy[S] {
 }
 
 // WaitForCondition polls check until the configured wait strategy stops,
-// checkpointing the state between attempts and suspending for the strategy's
-// delay. It returns the final state.
+// checkpointing the state between attempts and waiting for the strategy's
+// delay. It returns the final state. When the next check becomes due while
+// other work of the handler is still running, it runs in the same
+// invocation. When nothing else can make progress, the invocation ends for
+// the delay and the next check runs in a new invocation.
 //
-// On each invocation cycle the SDK re-executes check with the previously
-// checkpointed state (or InitialState for the first attempt). The wait
+// On each attempt the SDK executes check with the previously checkpointed
+// state (or InitialState for the first attempt). The wait
 // strategy observes the round-tripped state and the 1-based attempt number
 // and decides whether to continue waiting or stop.
 //
@@ -31,7 +34,7 @@ func defaultConditionWaitStrategy[S any]() WaitStrategy[S] {
 // [*WaitForConditionError].
 //
 // If the wait strategy's Continue field is true, its Delay determines how
-// long the execution suspends before re-invoking. When Continue is false, the
+// long the execution waits before the next check. When Continue is false, the
 // final state is checkpointed and returned.
 //
 // Every state that check returns is serialized and checkpointed, whether the
@@ -75,6 +78,11 @@ func WaitForCondition[S any](ctx Context, name string, check func(StepContext, S
 // checkpointed timestamps and attempt count. An invocation that suspends
 // on a scheduled poll, or whose checkpoint the service refused because the
 // invocation has terminated, dispatches no end.
+//
+// After a RETRY checkpoint, or when the operation is replayed with a check
+// pending, the goroutine parks until a checkpoint response or a status
+// poll reports the operation READY, and the next check then runs in the
+// same invocation. The first poll is sent when the next check is due.
 func runWaitForCondition[S any](ec *execContext, id, name string, check func(StepContext, S) (S, error), cfg ConditionConfig[S], serdes Serdes) (S, error) {
 	var zero S
 	op := ec.state.get(id)
@@ -85,97 +93,142 @@ func runWaitForCondition[S any](ec *execContext, id, name string, check func(Ste
 		return zero, ec.parkUnfinishedReplay(op, id, string(OperationTypeStep), OperationSubTypeWaitForCondition, name)
 	}
 
-	// Determine the current attempt number. The checkpointed Attempt
-	// field counts completed attempts; the next execution is attempt+1.
-	attempt := 1
-	if op != nil && op.step != nil {
-		attempt = op.step.attempt + 1
-	}
-
-	if op != nil {
-		switch op.status {
-		case statusSucceeded:
-			// Terminal success: deserialize the final state without
-			// re-executing the check function. The replayed end is
-			// dispatched first, so a failing Serdes does not suppress it.
-			if op.step == nil {
-				return zero, fmt.Errorf("durable: WaitForCondition %q: checkpointed %s operation has no step details", name, op.status)
-			}
-			info := waitForConditionReplayedInfo(ec, id, name, op)
-			info.Result = op.step.result
-			dispatchOperationEnd(ec, info, PluginOperationSucceeded)
-			var out S
-			if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &out); err != nil {
-				return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
-			}
-			return out, nil
-
-		case statusFailed:
-			// Terminal failure: reconstruct the error from the
-			// checkpoint without re-executing.
-			if op.step == nil {
-				return zero, fmt.Errorf("durable: WaitForCondition %q: checkpointed %s operation has no step details", name, op.status)
-			}
-			wfcErr := newWaitForConditionError(name, op.step.attempt, op.step.record())
-			info := waitForConditionReplayedInfo(ec, id, name, op)
-			info.Error = wfcErr
-			dispatchOperationEnd(ec, info, PluginOperationFailed)
-			return zero, wfcErr
-
-		case statusPending:
-			// A retry (continue) is scheduled and its timer has not
-			// fired. Suspend; the backend re-invokes when the delay
-			// elapses. The operation began in an earlier invocation
-			// and has no outcome yet, so no hook is dispatched.
-			ec.blocked.Store(true)
-			ec.suspend.commitPending(ec.abandon)
-			return zero, errSuspendExecution
-
-		case statusStarted, statusReady:
-			// STARTED or READY: the backend has re-invoked after the
-			// previous cycle's timer. Re-execute the check below.
-
-		case statusCancelled, statusTimedOut, statusStopped:
-			// These are not produced for step operations; execute
-			// and let the backend reject if invalid.
+	// startDispatched records that this invocation dispatched the
+	// operation's start; lastAttempt is the attempt it ran last.
+	startDispatched := false
+	lastAttempt := 0
+	var info OperationHookInfo
+	for {
+		// Determine the current attempt number. The checkpointed Attempt
+		// field counts completed attempts; the next execution is attempt+1.
+		attempt := lastAttempt + 1
+		if op != nil && op.step != nil {
+			attempt = max(attempt, op.step.attempt+1)
 		}
-	}
 
-	// The operation's start belongs to its first attempt. op is nil for a
-	// live first attempt; else a previous invocation checkpointed the START
-	// and recorded no outcome, and the start is replayed with its status.
-	info := ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeWaitForCondition, op != nil)
-	info.Attempt = attempt
-	info.StartTimestamp = checkpointedStartTime(op)
-	if attempt == 1 {
-		status := PluginOperationStarted
 		if op != nil {
-			status = toPluginOperationStatus(op.status)
+			switch op.status {
+			case statusSucceeded:
+				// Terminal success: deserialize the final state without
+				// re-executing the check function. The replayed end is
+				// dispatched first, so a failing Serdes does not suppress it.
+				if op.step == nil {
+					return zero, fmt.Errorf("durable: WaitForCondition %q: checkpointed %s operation has no step details", name, op.status)
+				}
+				info := waitForConditionReplayedInfo(ec, id, name, op)
+				info.Result = op.step.result
+				dispatchOperationEnd(ec, info, PluginOperationSucceeded)
+				var out S
+				if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &out); err != nil {
+					return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+				}
+				return out, nil
+
+			case statusFailed:
+				// Terminal failure: reconstruct the error from the
+				// checkpoint without re-executing.
+				if op.step == nil {
+					return zero, fmt.Errorf("durable: WaitForCondition %q: checkpointed %s operation has no step details", name, op.status)
+				}
+				wfcErr := newWaitForConditionError(name, op.step.attempt, op.step.record())
+				info := waitForConditionReplayedInfo(ec, id, name, op)
+				info.Error = wfcErr
+				dispatchOperationEnd(ec, info, PluginOperationFailed)
+				return zero, wfcErr
+
+			case statusPending:
+				// A retry (continue) is scheduled and its timer has not
+				// fired. Wait until the next check is due. The operation
+				// began in an earlier invocation and has no outcome yet, so
+				// no hook is dispatched.
+				next, err := ec.awaitOperation(id, attemptDueRecord, nextAttemptTime(time.Time{}))
+				if err != nil {
+					return zero, err
+				}
+				op = withConditionState(next, op)
+				continue
+
+			case statusStarted, statusReady:
+				// STARTED or READY: the backend has re-invoked after the
+				// previous cycle's timer. Re-execute the check below.
+
+			case statusCancelled, statusTimedOut, statusStopped:
+				// These are not produced for step operations; execute
+				// and let the backend reject if invalid.
+			}
 		}
-		dispatchOperationStart(ec, info, status)
-	}
 
-	// The cycle counts as executing from its START checkpoint through the
-	// checkpoint of its outcome; see runStep for the reason.
-	result, serialized, err := func() (S, string, error) {
-		ec.suspend.enterExecuting()
-		defer ec.suspend.exitExecuting()
-		return executeWaitForConditionAttempt(ec, id, name, check, cfg, serdes, op, attempt)
-	}()
+		// The operation's start belongs to its first attempt. op is nil for a
+		// live first attempt; else a previous invocation checkpointed the START
+		// and recorded no outcome, and the start is replayed with its status.
+		if !startDispatched {
+			startDispatched = true
+			info = ec.operationHookInfo(id, name, string(OperationTypeStep), OperationSubTypeWaitForCondition, op != nil)
+			info.StartTimestamp = checkpointedStartTime(op)
+			if attempt == 1 {
+				status := PluginOperationStarted
+				if op != nil {
+					status = toPluginOperationStatus(op.status)
+				}
+				info.Attempt = attempt
+				dispatchOperationStart(ec, info, status)
+			}
+		}
+		info.Attempt = attempt
 
-	// The end reports the outcome this invocation recorded. A suspension
-	// on a scheduled poll is not an outcome.
-	info.IsReplay = false
-	if err == nil {
-		info.EndTimestamp = checkpointedEndTime(ec.state.get(id))
-		info.Result = serialized
-		dispatchOperationEnd(ec, info, PluginOperationSucceeded)
-	} else if !errors.Is(err, errSuspendExecution) {
-		info.EndTimestamp = checkpointedEndTime(ec.state.get(id))
-		info.Error = err
-		dispatchOperationEnd(ec, info, PluginOperationFailed)
+		// The cycle counts as executing from its START checkpoint through the
+		// checkpoint of its outcome; see runStep for the reason.
+		result, serialized, err := func() (S, string, error) {
+			ec.suspend.enterExecuting()
+			defer ec.suspend.exitExecuting()
+			return executeWaitForConditionAttempt(ec, id, name, check, cfg, serdes, op, attempt)
+		}()
+		lastAttempt = attempt
+
+		if errors.Is(err, errRetryScheduled) {
+			next, aerr := ec.awaitOperation(id, attemptDueRecord, nextAttemptTime(retryDue(err)))
+			if aerr != nil {
+				return zero, aerr
+			}
+			// The READY record carries the state the RETRY checkpointed;
+			// a record without it falls back to the state just written.
+			fallback := &operation{step: &stepDetails{attempt: attempt, result: serialized}}
+			op = withConditionState(next, fallback)
+			continue
+		}
+
+		// The end reports the outcome this invocation recorded. A suspension
+		// on a scheduled poll is not an outcome.
+		info.IsReplay = false
+		if err == nil {
+			info.EndTimestamp = checkpointedEndTime(ec.state.get(id))
+			info.Result = serialized
+			dispatchOperationEnd(ec, info, PluginOperationSucceeded)
+		} else if !errors.Is(err, errSuspendExecution) {
+			info.EndTimestamp = checkpointedEndTime(ec.state.get(id))
+			info.Error = err
+			dispatchOperationEnd(ec, info, PluginOperationFailed)
+		}
+		return result, err
 	}
-	return result, err
+}
+
+// withConditionState returns next with the checkpointed state of prev when
+// next carries none, so the next check starts from the state the previous
+// one recorded.
+func withConditionState(next, prev *operation) *operation {
+	if next == nil || (next.step != nil && next.step.result != "") || prev == nil || prev.step == nil {
+		return next
+	}
+	merged := *next
+	step := stepDetails{attempt: prev.step.attempt, result: prev.step.result}
+	if next.step != nil {
+		step = *next.step
+		step.result = prev.step.result
+		step.attempt = max(step.attempt, prev.step.attempt)
+	}
+	merged.step = &step
+	return &merged
 }
 
 // waitForConditionReplayedInfo returns the info of the replayed end of the
@@ -192,8 +245,10 @@ func waitForConditionReplayedInfo(ec *execContext, id, name string, op *operatio
 // executeWaitForConditionAttempt runs one cycle: checkpoint START (if not
 // already started), deserialize current state, call check, consult the
 // wait strategy, and checkpoint the outcome. When the condition is met it
-// returns the final state and its serialized form as checkpointed; the
-// serialized form is empty on every other outcome.
+// returns the final state and its serialized form as checkpointed. When
+// the strategy continues, it returns the serialized state the RETRY
+// checkpointed and an error matching errRetryScheduled. The serialized
+// form is empty on every other outcome.
 func executeWaitForConditionAttempt[S any](ec *execContext, id, name string, check func(StepContext, S) (S, error), cfg ConditionConfig[S], serdes Serdes, op *operation, attempt int) (S, string, error) {
 	var zero S
 
@@ -356,7 +411,7 @@ func executeWaitForConditionAttempt[S any](ec *execContext, id, name string, che
 	}
 
 	// Condition not met: checkpoint RETRY with the intermediate state and
-	// the strategy's delay, then suspend. The intermediate state is a
+	// the strategy's delay, then report the retry to the caller. The intermediate state is a
 	// checkpoint payload like the final result, so the same size limit
 	// applies to it.
 	if err := checkResultSize(serialized, name); err != nil {
@@ -375,9 +430,9 @@ func executeWaitForConditionAttempt[S any](ec *execContext, id, name string, che
 		return zero, "", suspendIfTerminated(cerr)
 	}
 
-	ec.blocked.Store(true)
-	ec.suspend.commitPending(ec.abandon)
-	return zero, "", errSuspendExecution
+	// The service owns the delay and reports the operation READY once it
+	// elapses; the caller waits for that.
+	return zero, string(serialized), &retryScheduledError{due: time.Now().Add(time.Duration(delaySec) * time.Second)}
 }
 
 // runCheckFunc executes the check function with panic recovery. ctx is the

@@ -1,8 +1,9 @@
-// Command force-checkpoint-step-retry demonstrates force-checkpoint polling
-// when a long-running step in one parallel branch blocks invocation
-// termination while another branch retries a failing step. The runtime's
-// force-checkpoint mechanism ensures retry progress is checkpointed even
-// though the long-running branch hasn't yielded.
+// Command force-checkpoint-step-retry demonstrates status polling when a
+// long-running step in one parallel branch keeps the invocation running
+// while another branch retries a failing step. The SDK polls the retrying
+// step's status, and each attempt runs in the same invocation once it is
+// due, so the retrying step succeeds on its third attempt before the
+// long-running step finishes.
 package main
 
 import (
@@ -30,9 +31,11 @@ func handler(ctx durable.Context, _ any) (string, error) {
 			attemptCount := 0
 			return durable.Step(branchCtx, "retrying-step", func(_ durable.StepContext) (string, error) {
 				// The counter lives in the branch, so it restarts at 0 on
-				// every invocation; the step therefore exhausts its
-				// retries, which is the failure the batch tolerates below.
-				attemptCount++ //durable:ignore durableclosure -- the reset on each invocation is the behaviour this example exercises
+				// every invocation. All three attempts run in the first
+				// invocation, so the third succeeds. A run whose retries
+				// span invocations exhausts them instead, which is the
+				// failure the batch tolerates below.
+				attemptCount++ //durable:ignore durableclosure -- the counter shows whether the attempts ran in one invocation
 				if attemptCount < 3 {
 					return "", fmt.Errorf("attempt %d failed", attemptCount)
 				}

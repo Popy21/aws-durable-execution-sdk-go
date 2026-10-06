@@ -23,11 +23,19 @@ func operationsFromPayload(in *wire.InitialExecutionState) []*operation {
 		op.setTimestamps(w.StartTimestamp.Ptr(), w.EndTimestamp.Ptr())
 		if sd := w.StepDetails; sd != nil {
 			op.step = &stepDetails{attempt: sd.Attempt, result: sd.Result}
+			if sd.NextAttemptTimestamp != nil && sd.NextAttemptTimestamp.Valid {
+				op.step.nextAttempt = sd.NextAttemptTimestamp.Time
+			}
 			if sd.Error != nil {
 				op.step.errType = sd.Error.ErrorType
 				op.step.errMessage = sd.Error.ErrorMessage
 				op.step.errData = sd.Error.ErrorData
 				op.step.stackTrace = sd.Error.StackTrace
+			}
+		}
+		if wd := w.WaitDetails; wd != nil {
+			if wd.ScheduledEndTimestamp != nil && wd.ScheduledEndTimestamp.Valid {
+				op.scheduledEnd = wd.ScheduledEndTimestamp.Time
 			}
 		}
 		if id := w.ChainedInvokeDetails; id != nil {

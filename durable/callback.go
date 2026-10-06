@@ -30,6 +30,13 @@ func (c *Callback[O]) ID() string {
 // elapses, then returns the outcome. Failures are returned as a
 // [*CallbackExternalError] or a [*CallbackTimeoutError]; both match
 // [*CallbackError].
+//
+// The callback starts being watched at the first call. When a checkpoint
+// response or a status poll reports the callback finished while other work
+// of the handler is still running, Result returns its outcome in the same
+// invocation. The first poll is sent one second after Result blocks. When
+// nothing else can make progress, the invocation ends, and Result returns
+// the suspension signal, which must be returned unchanged.
 func (c *Callback[O]) Result() (O, error) {
 	return c.future.Result()
 }
@@ -116,17 +123,19 @@ func CreateCallback[O any](ctx Context, name string, opts ...CallbackOption) (*C
 			return cb, nil
 
 		case statusStarted, statusPending:
-			// Callback is in flight; create a future that fires
-			// suspend when Result() is called (deferred suspension).
-			// The start is replayed; the end belongs to the invocation
-			// that observes the settled callback.
+			// Callback is in flight; its future starts watching it
+			// when Result is first called. The start is replayed; the
+			// end belongs to the invocation that observes the settled
+			// callback.
 			info.IsReplay = true
 			dispatchOperationStart(ec, info, toPluginOperationStatus(op.status))
 			callbackID := ""
 			if op.callback != nil {
 				callbackID = op.callback.callbackID
 			}
-			fut := newPendingCallbackFuture[O](ec.suspend, ec)
+			fut := newPendingCallbackFuture(ec, id, func(settled *operation) (O, error) {
+				return observeCallbackOutcome[O](ec, settled, id, name, serdes, info)
+			})
 			return &Callback[O]{id: callbackID, future: fut}, nil
 
 		default:
@@ -159,16 +168,19 @@ func CreateCallback[O any](ctx Context, name string, opts ...CallbackOption) (*C
 
 	// The callback is recorded. Its start timestamp comes from the
 	// checkpoint response when the response carried the record, else from
-	// the clock. The callback settles only in a later invocation, so this
-	// one dispatches no end.
+	// the clock. The end is dispatched by the invocation that observes
+	// the callback settled.
 	info := ec.operationHookInfo(id, name, string(OperationTypeCallback), OperationSubTypeCallback, false)
 	info.StartTimestamp = checkpointedStartTime(created)
 	dispatchOperationStart(ec, info, PluginOperationStarted)
 
-	// Return a callback whose Result() fires suspend on first call.
-	// This allows WaitForCallback to run the submitter step between
-	// CreateCallback and cb.Result() in the same invocation.
-	fut := newPendingCallbackFuture[O](ec.suspend, ec)
+	// Return a callback whose future starts watching it at the first
+	// Result call. This lets WaitForCallback run the submitter step
+	// between CreateCallback and cb.Result() in the same invocation.
+	serdes := callbackDeserializerForOptions(ec, options)
+	fut := newPendingCallbackFuture(ec, id, func(settled *operation) (O, error) {
+		return observeCallbackOutcome[O](ec, settled, id, name, serdes, info)
+	})
 
 	return &Callback[O]{id: callbackID, future: fut}, nil
 }
@@ -443,6 +455,33 @@ func wfcbFailedError(ec *execContext, op *operation, id, name string) error {
 		return newCallbackSubmitterError(name, "", rec)
 	}
 	return newChildContextError(name, rec)
+}
+
+// observeCallbackOutcome returns the outcome of a callback that a
+// checkpoint response or a poll reported finished in this invocation, and
+// dispatches its live end. op is the callback's terminal record and info
+// the hook info of its start. The outcome is the one a replay of the same
+// record returns.
+func observeCallbackOutcome[O any](ec *execContext, op *operation, id, name string, serdes Serdes, info OperationHookInfo) (O, error) {
+	var zero O
+	info.IsReplay = false
+	info.EndTimestamp = checkpointedEndTime(op)
+	switch op.status {
+	case statusSucceeded:
+		if op.callback != nil {
+			info.Result = op.callback.result
+		}
+		dispatchOperationEnd(ec, info, PluginOperationSucceeded)
+		cb := resolveCallbackSuccess[O](ec.Context, op, id, name, serdes, ec.serdesCtx(id))
+		return cb.future.value, cb.future.err
+	case statusFailed, statusTimedOut:
+		_, cbErr := resolveCallbackFailure[O](op, name)
+		info.Error = cbErr
+		dispatchOperationEnd(ec, info, toPluginOperationStatus(op.status))
+		return zero, cbErr
+	default:
+		return zero, fmt.Errorf("durable: callback %q: unexpected checkpointed status %s", name, op.status)
+	}
 }
 
 // resolveCallbackSuccess creates a pre-settled callback for a SUCCEEDED

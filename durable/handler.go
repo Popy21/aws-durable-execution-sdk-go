@@ -226,8 +226,7 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 	// errSuspendExecution, so that a handler blocked on a pending operation
 	// counts as blocked while the outcome is decided. On every other exit,
 	// including a panic, the token is held until here, so a branch that
-	// commits to PENDING after the handler returned cannot change the
-	// outcome. Releasing it lets the suspend signal fire once the last
+	// blocks after the handler returned cannot suspend the invocation. Releasing it lets the suspend signal fire once the last
 	// orphaned branch deregisters, which settles any future a goroutine is
 	// still blocked on. The checkpointer itself is terminated earlier, in
 	// runHandler, the moment the handler's outcome is decided.
@@ -366,6 +365,20 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 	// plugin implements the hook; see enrichLogHandler.
 	ec = newExecContext(ctx, in.DurableExecutionArn, invMeta, newEnrichLogHandler(h.options.logHandler, pd), state)
 	ec.checkpointer = cp
+	// The suspension signal learns of every checkpoint request and
+	// response, polls the operations goroutines are parked on through the
+	// checkpointer, and schedules no poll within minPollRemaining of the
+	// invocation deadline.
+	cp.suspend = ec.suspend
+	ec.suspend.settle = h.options.suspendSettle
+	ec.suspend.checkpointBusy = cp.busy
+	ec.suspend.poller = func() error { return cp.checkpoint(ctx, nil) }
+	if dl, ok := ctx.Deadline(); ok {
+		ec.suspend.deadline = dl
+	}
+	ec.suspend.ctxDone = ctx.Done()
+	stopCtxWatch := context.AfterFunc(ctx, ec.suspend.maybeSuspend)
+	defer stopCtxWatch()
 	ec.executionStartTime = execStartTimestamp
 	ec.noStackTraces = h.options.noStackTraces
 	cp.state = state
@@ -407,6 +420,7 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 		// own record of an oversized result is written afterwards through
 		// checkpointFinal, which termination does not refuse.
 		defer cp.terminate()
+		defer ec.suspend.stopPolls()
 
 		// Register the root handler goroutine as an active branch. The
 		// goroutine deregisters itself only when the handler unwinds
@@ -473,7 +487,8 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 				return nil, errSuspendExecution
 			}
 			if ec.suspend.fired() || ec.suspend.committed() {
-				// The handler returned while a pending commitment
+				// The handler returned while a branch is blocked on an
+				// operation that is not finished, or while a commitment
 				// stands: the invocation responds PENDING. Orphaned
 				// branches (durable.Go children still mid-flight) are
 				// not joined, so the response is immediate; the
@@ -486,6 +501,17 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 			}
 			return out.result, nil
 		case <-ec.suspend.done():
+			// The signal fires only while the handler goroutine is
+			// parked inside the SDK or has already unwound, and firing
+			// resumes every parked goroutine with the suspension
+			// sentinel. Wait for the handler goroutine to return, so no
+			// handler code runs after the response. The invocation's
+			// context bounds the wait.
+			select {
+			case out := <-outcomeCh:
+				handlerTrace = out.trace
+			case <-ctx.Done():
+			}
 			if halt := cp.haltCause(); halt != nil {
 				// Same override as above: a stale-token rejection ends
 				// the invocation with an error even when every branch

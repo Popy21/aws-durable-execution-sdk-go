@@ -368,8 +368,10 @@ func (r *LocalRunner[I, O]) TimeoutChainedInvoke(name string) error {
 //
 // Count calls, not operations: a step checkpoints twice, once when it
 // starts and once when it settles, so OmitTokenOnCheckpoint(2) withholds
-// the token on the first step's result. Calls are counted from the moment
-// of scheduling.
+// the token on the first step's result. A status poll the SDK sends while
+// a goroutine awaits an unfinished operation is a checkpoint call with no
+// updates, so it counts toward n too. Calls are counted from the moment of
+// scheduling.
 //
 // A later call replaces a schedule that has not fired yet. n must be at
 // least 1; OmitTokenOnCheckpoint panics otherwise.

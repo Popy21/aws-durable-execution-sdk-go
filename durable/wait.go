@@ -21,11 +21,13 @@ type WaitOption interface {
 // has no fields yet; see [WaitOption].
 type waitOptions struct{}
 
-// Wait suspends the execution for duration d without consuming compute
-// resources: the invocation ends and the execution resumes in a
-// new invocation when the duration elapses. On replay a completed wait
-// returns immediately. name identifies the wait for tracking and debugging;
-// pass "" for an unnamed wait.
+// Wait pauses the execution for duration d. When the wait elapses while
+// other work of the handler is still running, Wait returns in the same
+// invocation. When nothing else can make progress, the invocation ends
+// without consuming compute resources, and the execution resumes in a new
+// invocation when the duration elapses. On replay a completed wait returns
+// immediately. name identifies the wait for tracking and debugging; pass
+// "" for an unnamed wait.
 //
 // The duration is rounded up to a whole number of seconds.
 func Wait(ctx Context, name string, d time.Duration, opts ...WaitOption) error {
@@ -50,7 +52,8 @@ func Wait(ctx Context, name string, d time.Duration, opts ...WaitOption) error {
 // WaitAsync is [Wait], except that the wait completes through the returned
 // future, allowing other durable operations to proceed concurrently.
 //
-// On invocation suspension, the returned future is settled with
+// The future settles when the wait elapses, in the invocation that observes
+// it. On invocation suspension, the returned future is settled with
 // errSuspendExecution so goroutines blocked on [Future.Result] unwind.
 func WaitAsync(ctx Context, name string, d time.Duration, opts ...WaitOption) *Future[Void] {
 	ec, ok := ctx.(*execContext)
@@ -94,12 +97,20 @@ func WaitAsync(ctx Context, name string, d time.Duration, opts ...WaitOption) *F
 // Separated from [Wait] so that both the blocking and async variants share
 // the same core.
 //
+// After its START checkpoint, or when it is replayed while still STARTED,
+// the wait parks the goroutine until a checkpoint response or a poll
+// reports it SUCCEEDED, then returns. The first poll is sent at the wait's
+// scheduled end. The invocation suspends instead when nothing else can make
+// progress first.
+//
 // Operation lifecycle hooks: a wait dispatches at most one start and at most
 // one end per invocation. A live wait dispatches a start after its START
-// checkpoint and then suspends, with no end. A wait replayed while still
-// STARTED dispatches a replayed start and suspends. A wait replayed as
-// SUCCEEDED dispatches only a replayed end with the checkpointed timestamps:
-// its start was dispatched by the invocation that recorded it.
+// checkpoint. A wait replayed while still STARTED dispatches a replayed
+// start. Either then dispatches a live end in the invocation that observes
+// the wait SUCCEEDED, or no end when the invocation suspends first. A wait
+// replayed as SUCCEEDED dispatches only a replayed end with the
+// checkpointed timestamps: its start was dispatched by the invocation that
+// recorded it.
 func runWait(ec *execContext, id, name string, d time.Duration) error {
 	op := ec.state.get(id)
 	if err := validateReplayConsistency(op, string(OperationTypeWait), OperationSubTypeWait, name); err != nil {
@@ -122,9 +133,7 @@ func runWait(ec *execContext, id, name string, d time.Duration) error {
 			info := ec.operationHookInfo(id, name, string(OperationTypeWait), OperationSubTypeWait, true)
 			info.StartTimestamp = op.startTimestamp
 			dispatchOperationStart(ec, info, PluginOperationStarted)
-			ec.blocked.Store(true)
-			ec.suspend.commitPending(ec.abandon)
-			return errSuspendExecution
+			return awaitWait(ec, id, name, info, checkpointedStartTime(op).Add(d))
 		case statusPending, statusReady, statusFailed, statusCancelled, statusTimedOut, statusStopped:
 			return fmt.Errorf("durable: wait %q: unexpected checkpointed status %s", name, op.status)
 		}
@@ -163,9 +172,30 @@ func runWait(ec *execContext, id, name string, d time.Duration) error {
 	info.StartTimestamp = checkpointedStartTime(ec.state.get(id))
 	dispatchOperationStart(ec, info, PluginOperationStarted)
 
-	ec.blocked.Store(true)
-	ec.suspend.commitPending(ec.abandon)
-	return errSuspendExecution
+	return awaitWait(ec, id, name, info, info.StartTimestamp.Add(time.Duration(waitSec)*time.Second))
+}
+
+// awaitWait parks the goroutine until the wait id is reported finished and
+// dispatches its live end. fallbackEnd is the time the wait is expected to
+// elapse when its record carries no scheduled end; the first poll is sent
+// then. info is the hook info of the wait's start.
+func awaitWait(ec *execContext, id, name string, info OperationHookInfo, fallbackEnd time.Time) error {
+	op, err := ec.awaitOperation(id, terminalRecord, func(op *operation) time.Time {
+		if op != nil && !op.scheduledEnd.IsZero() {
+			return op.scheduledEnd
+		}
+		return fallbackEnd
+	})
+	if err != nil {
+		return err
+	}
+	if op.status != statusSucceeded {
+		return fmt.Errorf("durable: wait %q: unexpected checkpointed status %s", name, op.status)
+	}
+	info.IsReplay = false
+	info.EndTimestamp = checkpointedEndTime(op)
+	dispatchOperationEnd(ec, info, PluginOperationSucceeded)
+	return nil
 }
 
 // checkpointedStartTime returns op's start timestamp when op exists and
