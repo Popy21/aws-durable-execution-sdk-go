@@ -95,9 +95,12 @@ func TestHandler(t *testing.T) {
 		t.Errorf("record summary = %q, want the custom summary starting with %q", record.Summary, customSummaryPrefix)
 	}
 
-	// Concurrent branches checkpoint in scheduling-dependent order, so the
-	// signature is compared as a set.
-	extest.AssertSignature(t, result, extest.Unordered)
+	// The map completes early on MinSuccessful while item 1 is still in
+	// flight, so item 1 may or may not have created its slow-item wait
+	// before the batch abandoned it. Subset lists the operations every run
+	// produces and tolerates that inner wait when a run records it; item 1
+	// itself is always reported STARTED, so it stays in the golden.
+	extest.AssertSignature(t, result, extest.Subset)
 }
 
 func TestHandlerSmallPayload(t *testing.T) {
@@ -119,6 +122,8 @@ func TestHandlerSmallPayload(t *testing.T) {
 	}
 
 	// The payload size changes how the map result is checkpointed, not
-	// which operations run, so both sizes share the golden.
-	extest.AssertSignature(t, result, extest.Unordered)
+	// which operations run, so both sizes share the golden. Subset for the
+	// same reason as TestHandler: item 1's inner wait is scheduling
+	// dependent.
+	extest.AssertSignature(t, result, extest.Subset)
 }

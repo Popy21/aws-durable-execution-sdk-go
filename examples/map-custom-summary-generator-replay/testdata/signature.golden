@@ -18,12 +18,6 @@
     "status": "STARTED"
   },
   {
-    "type": "WAIT",
-    "subType": "Wait",
-    "name": "slow-item",
-    "status": "SUCCEEDED"
-  },
-  {
     "type": "CONTEXT",
     "subType": "MapIteration",
     "name": "item-2",
