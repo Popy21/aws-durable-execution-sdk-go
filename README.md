@@ -894,6 +894,21 @@ belongs to the SDK in every mode. A value you attach under that name with
 group opened with `WithGroup` is kept. At construction the option is
 `durable.Start(handler, durable.WithReplayLogMode(durable.ReplayLogModeEmit))`.
 
+### Records the SDK writes
+
+A checkpoint response can withdraw the checkpoint token, which means the
+service accepts no further checkpoints from the current invocation. When
+that suspends the invocation, the SDK writes one WARN record through the
+handler's log handler, with the `requestId` and `executionArn` fields. Its
+message is `Checkpoint response contained no CheckpointToken: the service
+will accept no further checkpoints from this invocation. Suspending; the
+execution continues on the next invocation.` The JavaScript SDK writes the
+same message, so one CloudWatch query finds it for both. Replay suppression
+never drops this record, because it reports the state of the invocation.
+The execution continues on the next invocation. When the withdrawn token
+answers the checkpoint of the execution's final result, the execution has
+finished, and the SDK writes no record.
+
 ## Plugin API
 
 The plugin instrumentation API is experimental. Its hooks, info types,

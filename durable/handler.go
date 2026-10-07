@@ -79,6 +79,11 @@ type HandlerOption interface {
 // returns from [Plugin.EnrichLogContext] arrive as attributes of the
 // record; that field documents their precedence. To replace the handler
 // from inside the handler body, see [ConfigureLogging].
+//
+// The SDK itself writes one WARN record through this handler when a
+// checkpoint response without a token suspends the invocation, carrying
+// the requestId and executionArn attributes. Replay suppression never
+// drops it, because it reports the state of the invocation.
 func WithLogHandler(h slog.Handler) HandlerOption {
 	return handlerOptionFunc(func(o *handlerOptions) { o.logHandler = h })
 }
@@ -195,6 +200,11 @@ type durableHandler[I, O any] struct {
 // bytes for the response envelope. Results larger than this are persisted
 // through a checkpoint instead, and the response carries an empty Result.
 const lambdaResponseSizeLimit = 6*1024*1024 - 50
+
+// tokenWithdrawnMessage is the WARN record written when a checkpoint
+// response without a token suspends the invocation. The JavaScript SDK
+// writes the same text, so one log query finds the record in both.
+const tokenWithdrawnMessage = "Checkpoint response contained no CheckpointToken: the service will accept no further checkpoints from this invocation. Suspending; the execution continues on the next invocation."
 
 // errSuspendExecution signals that the current invocation must end with a
 // PENDING response because execution is blocked on pending operations
@@ -365,6 +375,13 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 	// plugin implements the hook; see enrichLogHandler.
 	ec = newExecContext(ctx, in.DurableExecutionArn, invMeta, newEnrichLogHandler(h.options.logHandler, pd), state)
 	ec.checkpointer = cp
+	// A response without a token suspends the invocation. The record is
+	// written through the root context's handler without replay
+	// suppression, because it reports the state of the invocation, not
+	// replayed handler code.
+	cp.onTokenWithdrawn = func() {
+		slog.New(ec.scopedLogHandler(ec.logScope)).WarnContext(ctx, tokenWithdrawnMessage)
+	}
 	// The suspension signal learns of every checkpoint request and
 	// response, polls the operations goroutines are parked on through the
 	// checkpointer, and schedules no poll within minPollRemaining of the
@@ -497,6 +514,19 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 				// checkpointer termination deferred above stops them
 				// recording further state.
 				return nil, errSuspendExecution
+			}
+			// The handler returned a result or an error. A checkpoint an
+			// unawaited branch sent may still be in flight, and its
+			// response decides whether the service still follows this
+			// invocation. Terminate the checkpointer so no new branch
+			// request is sent, wait for the call in flight to settle,
+			// and read the halt cause again: a response without a token
+			// means the outcome cannot be reported, and the invocation
+			// responds PENDING. The context's end bounds the wait.
+			cp.terminate()
+			cp.awaitIdle(ctx)
+			if halt := cp.haltCause(); halt != nil {
+				return nil, halt
 			}
 			if out.err != nil {
 				return nil, out.err
@@ -636,13 +666,13 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 			}
 			if cerr := cp.checkpointFinal(ctx, []OperationUpdate{update}); cerr != nil {
 				if errors.Is(cerr, errCheckpointTerminated) {
-					// The response carried no token: the service will
-					// accept no further checkpoints from this
-					// invocation. The result may or may not have been
-					// recorded, so the invocation must not claim the
-					// execution finished. Respond PENDING, as for any
-					// suspension; the next invocation replays and
-					// reports the result.
+					// An earlier response carried no token: the service
+					// accepts no further checkpoints from this
+					// invocation, so the result was not recorded. A
+					// response without a token to this write itself is
+					// not an error: it means the execution finished.
+					// Respond PENDING, as for any suspension; the next
+					// invocation replays and reports the result.
 					dispatchNotification(pd, func(p *Plugin) {
 						if p.OnInvocationEnd != nil {
 							p.OnInvocationEnd(ctx, InvocationEndHookInfo{

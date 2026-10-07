@@ -452,11 +452,11 @@ func TestOversizedResultEventOrder(t *testing.T) {
 	}
 }
 
-// TestOversizedResultPendingRecordsNoTerminalEvent asserts that when the
-// checkpoint carrying an oversized result gets a response without a
-// token, the invocation ends PENDING and no terminal event is recorded;
-// the next invocation then records the terminal event last.
-func TestOversizedResultPendingRecordsNoTerminalEvent(t *testing.T) {
+// TestOversizedResultTokenlessResponseSucceeds asserts that when the
+// checkpoint carrying an oversized result gets a response without a token,
+// the execution has finished: the invocation reports SUCCEEDED and the
+// terminal event is recorded last.
+func TestOversizedResultTokenlessResponseSucceeds(t *testing.T) {
 	handler := func(_ durable.Context, _ string) (string, error) {
 		return strings.Repeat("a", oversizedResultBytes-2), nil
 	}
@@ -468,29 +468,17 @@ func TestOversizedResultPendingRecordsNoTerminalEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != durabletest.Pending {
-		t.Fatalf("Status = %s, want PENDING", result.Status)
-	}
-	wantTypes := []string{"ExecutionStarted", "InvocationCompleted"}
-	if got := result.EventTypes(); !reflect.DeepEqual(got, wantTypes) {
-		t.Fatalf("EventTypes() after PENDING =\n  %v\nwant\n  %v", got, wantTypes)
-	}
-
-	result, err = runner.Run("go")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if result.Status != durabletest.Succeeded {
 		t.Fatalf("Status = %s, want SUCCEEDED", result.Status)
 	}
-	wantTypes = []string{"ExecutionStarted", "InvocationCompleted", "InvocationCompleted", "ExecutionSucceeded"}
+	wantTypes := []string{"ExecutionStarted", "InvocationCompleted", "ExecutionSucceeded"}
 	if got := result.EventTypes(); !reflect.DeepEqual(got, wantTypes) {
-		t.Fatalf("EventTypes() after SUCCEEDED =\n  %v\nwant\n  %v", got, wantTypes)
+		t.Fatalf("EventTypes() =\n  %v\nwant\n  %v", got, wantTypes)
 	}
 	if d := result.Events[len(result.Events)-1].ExecutionSucceededDetails; d == nil || d.Result == nil || len(aws.ToString(d.Result.Payload)) != oversizedResultBytes {
 		t.Errorf("ExecutionSucceeded details = %+v, want the checkpointed result", d)
 	}
-	if len(result.Invocations) != 2 {
-		t.Errorf("len(Invocations) = %d, want 2", len(result.Invocations))
+	if len(result.Invocations) != 1 {
+		t.Errorf("len(Invocations) = %d, want 1", len(result.Invocations))
 	}
 }

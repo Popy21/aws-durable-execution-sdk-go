@@ -249,14 +249,14 @@ func TestOrphanBranchRefusedBeforeInvocationPostProcessing(t *testing.T) {
 
 // TestOversizedResultCheckpointedBehindInFlightOrphan asserts that when an
 // orphan branch's checkpoint call is in flight as the handler returns an
-// oversized result, the invocation's final write is still sent, after that
-// call and with the token it rotated to, while the orphan's own request is
-// refused.
+// oversized result, the invocation waits for that call, then sends its
+// final write with the token the call rotated to, while the orphan's own
+// request is refused.
 func TestOversizedResultCheckpointedBehindInFlightOrphan(t *testing.T) {
 	large := resultOfSerializedSize(lambdaResponseSizeLimit + 1)
 
 	orphanInFlight := make(chan struct{})
-	handlerDecided := make(chan struct{})
+	handlerReturned := make(chan struct{})
 	var (
 		mu      sync.Mutex
 		tokens  []string
@@ -271,31 +271,25 @@ func TestOversizedResultCheckpointedBehindInFlightOrphan(t *testing.T) {
 			n := len(tokens)
 			mu.Unlock()
 			if carriesName(in.Updates, "orphan-step") {
-				// The orphan's step START: hold it until the handler's
-				// outcome has been decided.
+				// The orphan's step START: hold it until the handler
+				// has returned and the invocation has terminated the
+				// checkpointer to wait for this call.
 				close(orphanInFlight)
 				select {
-				case <-handlerDecided:
+				case <-handlerReturned:
 				case <-ctx.Done():
 					return CheckpointOutput{}, ctx.Err()
 				}
+				time.Sleep(100 * time.Millisecond)
 			}
 			return CheckpointOutput{CheckpointToken: "token-" + strconv.Itoa(n)}, nil
 		},
 	}
 
 	stepErr := make(chan error, 1)
-	plugin := Plugin{
-		WrapInvocation: func(ctx context.Context, _ InvocationHookInfo, fn func(context.Context) (any, error)) (any, error) {
-			res, err := fn(ctx)
-			// runHandler has returned, so the checkpointer is terminated.
-			// Let the orphan's in-flight call complete.
-			close(handlerDecided)
-			return res, err
-		},
-	}
 
 	h := Wrap[string, string](func(ctx Context, _ string) (string, error) {
+		defer close(handlerReturned)
 		_ = Go(ctx, "orphan", func(c Context) (string, error) {
 			_, err := Step(c, "orphan-step", func(_ StepContext) (string, error) {
 				return "late", nil
@@ -305,7 +299,7 @@ func TestOversizedResultCheckpointedBehindInFlightOrphan(t *testing.T) {
 		})
 		<-orphanInFlight
 		return large, nil
-	}, withLambdaAPI(fake), WithPlugins(plugin))
+	}, withLambdaAPI(fake))
 
 	raw, err := h(context.Background(), stepPayload(`""`))
 	if err != nil {

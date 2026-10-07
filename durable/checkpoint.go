@@ -108,6 +108,16 @@ type checkpointer struct {
 	// delivered. The invocation does not suspend while it is above zero.
 	outstanding atomic.Int64
 
+	// idleMu guards idleWaiters, the channels awaitIdle waits on. They
+	// are closed when outstanding drops to zero. idleMu is separate from
+	// mu because requests are delivered while mu is held.
+	idleMu      sync.Mutex
+	idleWaiters []chan struct{}
+
+	// onTokenWithdrawn, when non-nil, is called once when a response
+	// without a token halts the checkpointer. Set during invocation
+	// wiring to log the halt.
+	onTokenWithdrawn func()
 	// suspend, when non-nil, is told about every queued and settled
 	// request and is given the records of every checkpoint response, so
 	// that a response reporting an awaited operation finished resumes the
@@ -124,11 +134,19 @@ func (cp *checkpointer) busy() bool {
 // or in flight, lets the suspension conditions be checked again.
 func (cp *checkpointer) deliver(p *pendingCheckpoint, err error) {
 	p.done <- err
-	if cp.outstanding.Add(-1) == 0 && cp.suspend != nil {
-		if len(p.updates) > 0 {
-			cp.suspend.touch()
+	if cp.outstanding.Add(-1) == 0 {
+		cp.idleMu.Lock()
+		for _, ch := range cp.idleWaiters {
+			close(ch)
 		}
-		cp.suspend.maybeSuspend()
+		cp.idleWaiters = nil
+		cp.idleMu.Unlock()
+		if cp.suspend != nil {
+			if len(p.updates) > 0 {
+				cp.suspend.touch()
+			}
+			cp.suspend.maybeSuspend()
+		}
 	}
 }
 
@@ -202,13 +220,50 @@ func (cp *checkpointer) terminate() {
 // failure cannot change how the invocation ends. halt runs before the
 // requests in the failed call learn of the failure, so the handler always
 // sees the cause when it reads haltCause after the user function returns.
-func (cp *checkpointer) halt(end error) {
+//
+// halt reports whether this call recorded the cause, that is, whether no
+// cause was recorded before it.
+func (cp *checkpointer) halt(end error) bool {
 	cp.mu.Lock()
-	if cp.haltErr == nil {
+	recorded := cp.haltErr == nil
+	if recorded {
 		cp.haltErr = end
 	}
 	cp.mu.Unlock()
 	cp.terminate()
+	return recorded
+}
+
+// awaitIdle blocks until no checkpoint request is queued or in flight, or
+// until ctx is done. The handler calls it after terminating the
+// checkpointer, so the queue only shrinks: queued branch requests are
+// refused without a call, and a call already in flight delivers its
+// outcome when its response arrives.
+func (cp *checkpointer) awaitIdle(ctx context.Context) {
+	cp.idleMu.Lock()
+	if cp.outstanding.Load() == 0 {
+		cp.idleMu.Unlock()
+		return
+	}
+	ch := make(chan struct{})
+	cp.idleWaiters = append(cp.idleWaiters, ch)
+	cp.idleMu.Unlock()
+	select {
+	case <-ch:
+	case <-ctx.Done():
+	}
+}
+
+// carriesExecutionUpdate reports whether updates include an update of the
+// execution operation itself. Only the invocation's terminal update of the
+// execution's result does.
+func carriesExecutionUpdate(updates []OperationUpdate) bool {
+	for _, u := range updates {
+		if u.Type == OperationTypeExecution {
+			return true
+		}
+	}
+	return false
 }
 
 // haltCause returns the error the invocation must end with after the
@@ -238,8 +293,11 @@ func (cp *checkpointer) haltCause() error {
 // stale-token rejection (see [CheckpointError]) returns the classified
 // error and ends the invocation with it. An execution-scoped failure
 // returns the classified error and makes the invocation respond FAILED
-// with it. A response without a token returns errCheckpointTerminated and
-// ends the invocation with PENDING.
+// with it. A response without a token to a call that does not carry the
+// execution's terminal update returns errCheckpointTerminated and ends the
+// invocation with PENDING. A response without a token to a call that
+// carries the execution's terminal update means the execution finished;
+// it succeeds and halts nothing.
 // Every later call returns errCheckpointTerminated.
 //
 // If ctx is done before the updates are sent, checkpoint returns ctx.Err()
@@ -262,10 +320,11 @@ func (cp *checkpointer) checkpoint(ctx context.Context, updates []OperationUpdat
 // The write travels through the same flusher as every other request, so it
 // is sent after any call already in flight and with the token that call
 // rotated to. It is refused only when the service has stopped accepting
-// this invocation's checkpoints: after a response without a token it
-// returns errCheckpointTerminated, and after a stale-token rejection or an
-// execution-scoped failure it returns that error, exactly as checkpoint
-// would.
+// this invocation's checkpoints: after an earlier response without a token
+// it returns errCheckpointTerminated, and after a stale-token rejection or
+// an execution-scoped failure it returns that error, exactly as checkpoint
+// would. A response without a token to the write itself means the
+// execution finished, so the write succeeds.
 //
 // Only the invocation goroutine calls checkpointFinal, at most once, after
 // the handler's outcome is decided. Branch checkpoints never use it.
@@ -440,16 +499,27 @@ func (cp *checkpointer) send(batch []*pendingCheckpoint, token string) error {
 
 	if out.CheckpointToken == "" {
 		// A response without a token means the service will accept no
-		// further checkpoints from this invocation. The execution is
-		// not finished; this invocation just cannot make further
-		// progress. Halt so the invocation ends with PENDING, as for
-		// any other suspension: the requests in this call receive
+		// further checkpoints from this invocation. What that means
+		// depends on what the call carried.
+		if carriesExecutionUpdate(updates) {
+			// The call carried the execution's own terminal update,
+			// so the execution has reached its terminal state. No
+			// further checkpoint is needed: the call succeeded, and
+			// the invocation reports the terminal outcome.
+			return nil
+		}
+		// Any other call, a poll included: the execution is not
+		// finished, and this invocation cannot make further progress.
+		// Halt so the invocation ends with PENDING, as for any other
+		// suspension: the requests in this call receive
 		// errCheckpointTerminated, which every operation translates
 		// into errSuspendExecution, and the handler ends the
 		// invocation with errSuspendExecution even if user code
-		// swallows that error. Abandoned work replays on the next
-		// invocation.
-		cp.halt(errSuspendExecution)
+		// swallows that error. The response's execution state is not
+		// applied. Abandoned work replays on the next invocation.
+		if cp.halt(errSuspendExecution) && cp.onTokenWithdrawn != nil {
+			cp.onTokenWithdrawn()
+		}
 		return errCheckpointTerminated
 	}
 

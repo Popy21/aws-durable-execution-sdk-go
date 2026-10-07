@@ -295,6 +295,23 @@ decided. Result serialization, `WrapInvocation` post-processing, and the
 this invocation once the handler has finished, whatever runs between that
 point and the response.
 
+When the handler returns a result or an error, a checkpoint call that an
+unawaited branch sent may still be in flight. Its response decides whether
+the service still follows this invocation. So before it reports SUCCEEDED
+or FAILED, the invocation terminates the checkpointer, waits until no
+checkpoint request is queued or in flight, and reads the halt cause again.
+Termination refuses queued branch requests without a call, so the wait
+covers only the call already in flight. The invocation's context bounds
+the wait. A response without a token to that call halts the checkpointer,
+and the invocation responds PENDING instead of the handler's outcome.
+
+A response without a token to the call that carries the execution's own
+terminal update means the execution finished. That call succeeds, nothing
+halts, and the invocation reports the terminal outcome. A response without
+a token to any other call, a poll included, halts the checkpointer: the
+invocation responds PENDING and writes one WARN record through the root
+context's log handler, without replay suppression.
+
 One write follows termination: the invocation's own record of an oversized
 result. A result too large for the response envelope is persisted through
 a checkpoint on the root execution operation after the handler returns.
@@ -303,8 +320,9 @@ invocation goroutine. Termination refuses branch checkpoints; it does not
 refuse the final write. The final write travels through the same flusher
 as every other request, so it is sent after any branch call already in
 flight and with the token that call rotated to. It is refused only when
-the service has stopped accepting this invocation's checkpoints (a response
-without a token, a stale-token rejection, or an execution-scoped failure),
+the service has stopped accepting this invocation's checkpoints (an earlier
+response without a token, a stale-token rejection, or an execution-scoped
+failure),
 and then with the same error a branch checkpoint would receive.
 
 A deferred cleanup in `Invoke` releases the root handler's branch token

@@ -225,10 +225,11 @@ func TestMissingTokenEndsInvocationPendingWhenHandlerSwallowsIt(t *testing.T) {
 	}
 }
 
-func TestMissingTokenOnOversizedResultEndsInvocationPending(t *testing.T) {
-	// The checkpoint that persists an oversized result gets a response
-	// without a token. The invocation must not claim the execution
-	// finished, so it responds PENDING and the next invocation replays.
+func TestMissingTokenOnOversizedResultSucceeds(t *testing.T) {
+	// The checkpoint that persists an oversized result carries the
+	// execution's terminal update and gets a response without a token.
+	// That means the execution finished, so the invocation responds
+	// SUCCEEDED.
 	large := resultOfSerializedSize(lambdaResponseSizeLimit + 1)
 	fake, calls := countingClient(func(CheckpointInput) (CheckpointOutput, error) {
 		return CheckpointOutput{}, nil
@@ -239,11 +240,11 @@ func TestMissingTokenOnOversizedResultEndsInvocationPending(t *testing.T) {
 	}, withLambdaAPI(fake))
 	raw, err := h(context.Background(), stepPayload(`""`))
 	if err != nil {
-		t.Fatalf("Invoke error = %v, want PENDING response", err)
+		t.Fatalf("Invoke error = %v, want SUCCEEDED response", err)
 	}
 	resp := parseResponse(t, raw)
-	if resp.Status != invocationPending {
-		t.Fatalf("status = %q, want %q", resp.Status, invocationPending)
+	if resp.Status != invocationSucceeded {
+		t.Fatalf("status = %q, want %q", resp.Status, invocationSucceeded)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("checkpoint calls = %d, want 1", got)

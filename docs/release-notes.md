@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Changed: a checkpoint response without a token is classified by what the call carried
+
+A checkpoint response without a `CheckpointToken` means the service will
+accept no further checkpoints from the current invocation. The SDK now
+handles it the way the JavaScript SDK 2.6.0 does.
+
+- When the call carried the execution's terminal update, the execution
+  finished, and the invocation reports the terminal outcome. A result too
+  large for the response now reports `SUCCEEDED` in this case. Before, it
+  reported `PENDING`.
+- When the handler returns a result or an error while a branch's
+  checkpoint call is in flight, the invocation waits for that call. If its
+  response carries no token, the invocation reports `PENDING`. Before, it
+  reported the handler's outcome.
+- When a response without a token suspends the invocation, the SDK writes
+  one WARN record through the handler's log handler: `Checkpoint response
+  contained no CheckpointToken: the service will accept no further
+  checkpoints from this invocation. Suspending; the execution continues on
+  the next invocation.` Replay suppression never drops it. Before, the SDK
+  wrote no record.
+
+A response without a token to a poll suspends the invocation with
+`PENDING`, as for any other call that does not carry the terminal update.
+
 ### Changed: the default client sets request timeouts, and checkpoint calls are not retried by the SDK
 
 The default Lambda client now sets a 5 second connect timeout, a 50

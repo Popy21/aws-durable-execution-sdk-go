@@ -373,6 +373,11 @@ func (r *LocalRunner[I, O]) TimeoutChainedInvoke(name string) error {
 // updates, so it counts toward n too. Calls are counted from the moment of
 // scheduling.
 //
+// A call that carries the execution's terminal update, the checkpoint
+// that records a result too large for the response, is the exception: a
+// response without a token to it means the execution finished, so the
+// run reports SUCCEEDED.
+//
 // A later call replaces a schedule that has not fired yet. n must be at
 // least 1; OmitTokenOnCheckpoint panics otherwise.
 func (r *LocalRunner[I, O]) OmitTokenOnCheckpoint(n int) {
