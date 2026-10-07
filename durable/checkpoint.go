@@ -5,26 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 const (
-	// checkpointMaxAttempts is the maximum number of times a checkpoint
-	// call is attempted on retryable errors before giving up.
-	checkpointMaxAttempts = 3
-
-	// checkpointBaseDelay is the initial delay before the first retry.
-	checkpointBaseDelay = 100 * time.Millisecond
-
-	// checkpointMaxDelay caps the exponential backoff.
-	checkpointMaxDelay = 2 * time.Second
-
 	// checkpointMaxBatchUpdates caps how many operation updates one
 	// checkpoint call carries, independent of their byte size.
 	checkpointMaxBatchUpdates = 250
@@ -80,7 +68,7 @@ type pendingCheckpoint struct {
 // queued requests keep their arrival order within and across calls.
 //
 // mu guards only the queue, the flusher flag, and the token. It is never
-// held during a client call or a retry sleep.
+// held during a client call.
 type checkpointer struct {
 	client       ExecutionClient
 	executionArn string
@@ -239,11 +227,12 @@ func (cp *checkpointer) haltCause() error {
 // for the call that carries them. Updates from other goroutines that are
 // queued at the same time may travel in the same call.
 //
-// On retryable failures (server faults, throttling, network errors), the
-// call carrying the updates is retried up to [checkpointMaxAttempts] with
-// exponential backoff. Non-retryable failures (client faults other than
-// throttling) fail immediately. On any failure the token remains unchanged
-// and every request in the failed call receives the error.
+// The SDK makes one Checkpoint call per batch and does not retry it. The
+// default client's AWS standard retryer is the only retry: it retries
+// server faults, throttling, and connection errors before the call
+// returns. On any failure the token remains unchanged and every request in
+// the failed call receives the error. An invocation-scoped failure ends
+// the invocation, and the service invokes the execution again.
 //
 // Three outcomes halt the checkpointer for the rest of the invocation. A
 // stale-token rejection (see [CheckpointError]) returns the classified
@@ -414,105 +403,90 @@ func (cp *checkpointer) send(batch []*pendingCheckpoint, token string) error {
 		updates = append(updates, p.updates...)
 	}
 
-	var lastErr error
-	for attempt := range checkpointMaxAttempts {
-		// Re-check between retries: terminate() or halt() may have been
-		// called while we were sleeping.
-		if err := cp.refusal(final); err != nil {
-			return err
-		}
-
-		out, err := cp.client.Checkpoint(ctx, CheckpointInput{
-			ExecutionArn:    cp.executionArn,
-			CheckpointToken: token,
-			Updates:         updates,
-		})
-		if err != nil {
-			classified := classifyCheckpointError(err)
-			if classified.isStaleToken() {
-				// A newer invocation has superseded this one. The token
-				// never becomes valid again, so a retry cannot succeed.
-				// Halt: later checkpoint calls are refused, and the
-				// invocation ends with this error, so the execution
-				// continues in the invocation that holds the fresh token.
-				cp.halt(classified)
-				return classified
-			}
-			if classified.Scope() == ErrorScopeExecution {
-				// The service rejected the call in a way no retry can
-				// fix, and the operations it carried were not
-				// recorded. Halt: later checkpoint calls are refused,
-				// and the invocation responds FAILED with this error
-				// even if handler code catches it and returns a value.
-				cp.halt(classified)
-				return classified
-			}
-			if !classified.Retryable() {
-				return classified
-			}
-			lastErr = classified
-			if attempt < checkpointMaxAttempts-1 {
-				delay := checkpointBackoff(attempt)
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(delay):
-				}
-			}
-			continue
-		}
-
-		if out.CheckpointToken == "" {
-			// A response without a token means the service will accept no
-			// further checkpoints from this invocation. The execution is
-			// not finished; this invocation just cannot make further
-			// progress. Halt so the invocation ends with PENDING, as for
-			// any other suspension: the requests in this call receive
-			// errCheckpointTerminated, which every operation translates
-			// into errSuspendExecution, and the handler ends the
-			// invocation with errSuspendExecution even if user code
-			// swallows that error. Abandoned work replays on the next
-			// invocation.
-			cp.halt(errSuspendExecution)
-			return errCheckpointTerminated
-		}
-
-		cp.mu.Lock()
-		cp.token = out.CheckpointToken
-		// Merge updated operations into the execution state so that
-		// subsequent reads (e.g. reading CallbackId after START) see
-		// backend-assigned fields. Done under mu to keep the lock order
-		// checkpointer.mu → executionState.mu that merge documents.
-		var merged []*operation
-		if cp.state != nil && out.NewExecutionState != nil {
-			merged = make([]*operation, 0, len(out.NewExecutionState))
-			for _, apiOp := range out.NewExecutionState {
-				merged = append(merged, operationFromAPI(apiOp))
-			}
-			cp.state.merge(merged)
-		}
-		cp.mu.Unlock()
-		// The records are matched against the watches after the merge,
-		// so a goroutine that starts awaiting an operation in between
-		// reads the merged record itself. A goroutine resumed here is
-		// unparked before the requests of this call learn their outcome.
-		if cp.suspend != nil && len(merged) > 0 {
-			cp.suspend.onStateMerged(merged)
-		}
-
-		// The API call succeeded. The service rotated the token, so the
-		// local token follows it above whatever happened meanwhile: the
-		// invocation's final write, if any, must carry the token the
-		// service now expects. If termination was signaled while the call
-		// was in flight, the branch requests it carried are refused all
-		// the same: the branch treats the refusal as suspension and
-		// records nothing further in this invocation.
-		if !final && cp.terminated.Load() {
-			return errCheckpointTerminated
-		}
-		return nil
+	if err := cp.refusal(final); err != nil {
+		return err
 	}
-	return lastErr
+
+	out, err := cp.client.Checkpoint(ctx, CheckpointInput{
+		ExecutionArn:    cp.executionArn,
+		CheckpointToken: token,
+		Updates:         updates,
+	})
+	if err != nil {
+		classified := classifyCheckpointError(err)
+		if classified.isStaleToken() {
+			// A newer invocation has superseded this one. The token
+			// never becomes valid again. Halt: later checkpoint calls
+			// are refused, and the invocation ends with this error, so
+			// the execution continues in the invocation that holds the
+			// fresh token.
+			cp.halt(classified)
+			return classified
+		}
+		if classified.Scope() == ErrorScopeExecution {
+			// The service rejected the call in a way no retry can fix,
+			// and the operations it carried were not recorded. Halt:
+			// later checkpoint calls are refused, and the invocation
+			// responds FAILED with this error even if handler code
+			// catches it and returns a value.
+			cp.halt(classified)
+			return classified
+		}
+		// An invocation-scoped failure. The client's own retryer has
+		// already retried it, so the SDK adds no retry. The error ends
+		// the invocation, and the service invokes the execution again.
+		return classified
+	}
+
+	if out.CheckpointToken == "" {
+		// A response without a token means the service will accept no
+		// further checkpoints from this invocation. The execution is
+		// not finished; this invocation just cannot make further
+		// progress. Halt so the invocation ends with PENDING, as for
+		// any other suspension: the requests in this call receive
+		// errCheckpointTerminated, which every operation translates
+		// into errSuspendExecution, and the handler ends the
+		// invocation with errSuspendExecution even if user code
+		// swallows that error. Abandoned work replays on the next
+		// invocation.
+		cp.halt(errSuspendExecution)
+		return errCheckpointTerminated
+	}
+
+	cp.mu.Lock()
+	cp.token = out.CheckpointToken
+	// Merge updated operations into the execution state so that
+	// subsequent reads (e.g. reading CallbackId after START) see
+	// backend-assigned fields. Done under mu to keep the lock order
+	// checkpointer.mu → executionState.mu that merge documents.
+	var merged []*operation
+	if cp.state != nil && out.NewExecutionState != nil {
+		merged = make([]*operation, 0, len(out.NewExecutionState))
+		for _, apiOp := range out.NewExecutionState {
+			merged = append(merged, operationFromAPI(apiOp))
+		}
+		cp.state.merge(merged)
+	}
+	cp.mu.Unlock()
+	// The records are matched against the watches after the merge,
+	// so a goroutine that starts awaiting an operation in between
+	// reads the merged record itself. A goroutine resumed here is
+	// unparked before the requests of this call learn their outcome.
+	if cp.suspend != nil && len(merged) > 0 {
+		cp.suspend.onStateMerged(merged)
+	}
+
+	// The API call succeeded. The service rotated the token, so the
+	// local token follows it above whatever happened meanwhile: the
+	// invocation's final write, if any, must carry the token the
+	// service now expects. If termination was signaled while the call
+	// was in flight, the branch requests it carried are refused all
+	// the same: the branch treats the refusal as suspension and
+	// records nothing further in this invocation.
+	if !final && cp.terminated.Load() {
+		return errCheckpointTerminated
+	}
+	return nil
 }
 
 // refusal reports whether a request must be refused before its call is
@@ -553,16 +527,6 @@ func updatesWireSize(updates []OperationUpdate) int {
 		return 0
 	}
 	return len(b)
-}
-
-// checkpointBackoff computes the delay for the given retry attempt using
-// exponential backoff capped at [checkpointMaxDelay].
-func checkpointBackoff(attempt int) time.Duration {
-	delay := time.Duration(float64(checkpointBaseDelay) * math.Pow(2, float64(attempt)))
-	if delay > checkpointMaxDelay {
-		delay = checkpointMaxDelay
-	}
-	return delay
 }
 
 func (cp *checkpointer) currentToken() string {

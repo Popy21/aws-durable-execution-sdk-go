@@ -11,9 +11,13 @@ package durable
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	lambdaservice "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
@@ -35,18 +39,63 @@ type lambdaExecutionClient struct {
 
 var _ ExecutionClient = (*lambdaExecutionClient)(nil)
 
+// Request timeouts of the default client's HTTP client.
+const (
+	// defaultConnectTimeout bounds how long the client waits to open a
+	// connection.
+	defaultConnectTimeout = 5 * time.Second
+
+	// defaultResponseTimeout bounds how long the client waits for the
+	// response headers after it writes the request.
+	defaultResponseTimeout = 50 * time.Second
+
+	// defaultRequestTimeout bounds one request from start to end,
+	// including reading the response body.
+	defaultRequestTimeout = 55 * time.Second
+)
+
 // defaultExecutionClient builds the default [ExecutionClient] from the
 // default AWS config, tagging requests with the SDK's user agent.
+//
+// The client sets a 5 second connect timeout, a 50 second response
+// timeout, and a 55 second total request timeout, so a call that stalls
+// fails instead of running until the invocation deadline. Its AWS standard
+// retryer is the only retry of a checkpoint call: it retries server
+// faults, throttling, and connection errors, and the SDK adds no retry of
+// its own.
 func defaultExecutionClient(ctx context.Context) (ExecutionClient, error) {
+	cfg, err := defaultAWSConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &lambdaExecutionClient{api: lambdaservice.NewFromConfig(cfg)}, nil
+}
+
+// defaultAWSConfig loads the AWS config the default client is built from.
+func defaultAWSConfig(ctx context.Context) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithHTTPClient(defaultHTTPClient()),
 		config.WithAPIOptions([]func(*smithymw.Stack) error{
 			awsmiddleware.AddUserAgentKeyValue(userAgentKey, Version),
 		}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("durable: load AWS config: %w", err)
+		return aws.Config{}, fmt.Errorf("durable: load AWS config: %w", err)
 	}
-	return &lambdaExecutionClient{api: lambdaservice.NewFromConfig(cfg)}, nil
+	return cfg, nil
+}
+
+// defaultHTTPClient builds the HTTP client of the default client with its
+// request timeouts.
+func defaultHTTPClient() *awshttp.BuildableClient {
+	return awshttp.NewBuildableClient().
+		WithDialerOptions(func(d *net.Dialer) {
+			d.Timeout = defaultConnectTimeout
+		}).
+		WithTransportOptions(func(tr *http.Transport) {
+			tr.ResponseHeaderTimeout = defaultResponseTimeout
+		}).
+		WithTimeout(defaultRequestTimeout)
 }
 
 func (c *lambdaExecutionClient) GetExecutionState(ctx context.Context, in GetExecutionStateInput) (GetExecutionStateOutput, error) {

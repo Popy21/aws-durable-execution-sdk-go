@@ -152,44 +152,6 @@ func TestCheckpointCoalescesUpdatesArrivingWhileInFlight(t *testing.T) {
 	}
 }
 
-func TestCheckpointMutexFreeDuringRetryBackoff(t *testing.T) {
-	serverErr := &smithy.GenericAPIError{Code: "ServiceException", Fault: smithy.FaultServer}
-	var calls atomic.Int32
-	fake := &fakeLambdaFunc{
-		checkpoint: func(_ context.Context, _ CheckpointInput) (CheckpointOutput, error) {
-			if calls.Add(1) == 1 {
-				return CheckpointOutput{}, serverErr
-			}
-			return CheckpointOutput{CheckpointToken: "token-1"}, nil
-		},
-		getState: emptyGetState,
-	}
-	cp := newCheckpointer(fake, "arn:test", "token-0")
-
-	done := make(chan error, 1)
-	go func() { done <- cp.checkpoint(context.Background(), nil) }()
-	waitFor(t, "first attempt made", func() bool { return calls.Load() == 1 })
-
-	// The flusher is now sleeping for the first backoff (100ms). Reading the
-	// token takes cp.mu, so it must return well before the sleep ends.
-	tok := make(chan string, 1)
-	go func() { tok <- cp.currentToken() }()
-	select {
-	case got := <-tok:
-		if got != "token-0" {
-			t.Errorf("currentToken() during backoff = %q, want token-0", got)
-		}
-	case <-time.After(checkpointBaseDelay / 2):
-		t.Fatal("currentToken() blocked during retry backoff: mutex held across sleep")
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("checkpoint after retry: %v", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Errorf("client calls = %d, want 2", got)
-	}
-}
-
 func TestCheckpointBatchRespectsPayloadLimit(t *testing.T) {
 	fake := newGateLambda()
 	cp := newCheckpointer(fake, "arn:test", "token-0")

@@ -6,11 +6,13 @@ package durable
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	lambdaservice "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 )
@@ -437,5 +439,31 @@ func TestLambdaClientAdapterCheckpointError(t *testing.T) {
 	_, err := c.Checkpoint(context.Background(), CheckpointInput{})
 	if !errors.Is(err, wantErr) {
 		t.Errorf("Checkpoint() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestDefaultClientRequestTimeouts(t *testing.T) {
+	// Keep the test independent of the machine's AWS config files.
+	dir := t.TempDir()
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "credentials"))
+	t.Setenv("AWS_REGION", "us-west-2")
+
+	cfg, err := defaultAWSConfig(context.Background())
+	if err != nil {
+		t.Fatalf("defaultAWSConfig() error = %v", err)
+	}
+	hc, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
+	if !ok {
+		t.Fatalf("HTTPClient = %T, want *awshttp.BuildableClient", cfg.HTTPClient)
+	}
+	if got := hc.GetDialer().Timeout; got != 5*time.Second {
+		t.Errorf("dialer Timeout = %v, want 5s", got)
+	}
+	if got := hc.GetTransport().ResponseHeaderTimeout; got != 50*time.Second {
+		t.Errorf("transport ResponseHeaderTimeout = %v, want 50s", got)
+	}
+	if got := hc.GetTimeout(); got != 55*time.Second {
+		t.Errorf("client Timeout = %v, want 55s", got)
 	}
 }

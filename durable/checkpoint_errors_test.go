@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -349,45 +350,6 @@ func TestIsCheckpointRetryable(t *testing.T) {
 	}
 }
 
-func TestCheckpointRetryOnRetryableError(t *testing.T) {
-	retryableErr := &smithy.GenericAPIError{
-		Code:  "ServiceException",
-		Fault: smithy.FaultServer,
-	}
-
-	var mu sync.Mutex
-	callCount := 0
-	fake := &fakeLambdaFunc{
-		checkpoint: func(_ context.Context, in CheckpointInput) (CheckpointOutput, error) {
-			mu.Lock()
-			callCount++
-			n := callCount
-			mu.Unlock()
-			if n < 3 {
-				return CheckpointOutput{}, retryableErr
-			}
-			tok := "token-success"
-			return CheckpointOutput{CheckpointToken: tok}, nil
-		},
-		getState: emptyGetState,
-	}
-
-	cp := newCheckpointer(fake, "arn:test", "token-0")
-	err := cp.checkpoint(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("checkpoint() should succeed after retries, got: %v", err)
-	}
-	mu.Lock()
-	got := callCount
-	mu.Unlock()
-	if got != 3 {
-		t.Errorf("expected 3 attempts, got %d", got)
-	}
-	if cp.currentToken() != "token-success" {
-		t.Errorf("token = %q, want %q", cp.currentToken(), "token-success")
-	}
-}
-
 func TestCheckpointImmediateFailOnNonRetryable(t *testing.T) {
 	nonRetryableErr := &smithy.GenericAPIError{
 		Code:  "ValidationException",
@@ -429,7 +391,9 @@ func TestCheckpointImmediateFailOnNonRetryable(t *testing.T) {
 	}
 }
 
-func TestCheckpointExhaustsRetriesOnRetryable(t *testing.T) {
+func TestCheckpointRetryableFailureSentOnce(t *testing.T) {
+	// The SDK makes one call per batch. The client's own retryer is the
+	// only retry, so a fake client without one is called exactly once.
 	serverErr := &smithy.GenericAPIError{
 		Code:  "ServiceException",
 		Fault: smithy.FaultServer,
@@ -450,7 +414,7 @@ func TestCheckpointExhaustsRetriesOnRetryable(t *testing.T) {
 	cp := newCheckpointer(fake, "arn:test", "token-0")
 	err := cp.checkpoint(context.Background(), nil)
 	if err == nil {
-		t.Fatal("checkpoint() should fail after exhausting retries")
+		t.Fatal("checkpoint() should fail")
 	}
 	var ce *CheckpointError
 	if !errors.As(err, &ce) {
@@ -462,8 +426,8 @@ func TestCheckpointExhaustsRetriesOnRetryable(t *testing.T) {
 	mu.Lock()
 	got := callCount
 	mu.Unlock()
-	if got != checkpointMaxAttempts {
-		t.Errorf("expected %d attempts, got %d", checkpointMaxAttempts, got)
+	if got != 1 {
+		t.Errorf("checkpoint calls = %d, want 1", got)
 	}
 	if cp.currentToken() != "token-0" {
 		t.Errorf("token = %q, want unchanged %q", cp.currentToken(), "token-0")
@@ -471,7 +435,7 @@ func TestCheckpointExhaustsRetriesOnRetryable(t *testing.T) {
 }
 
 func TestCheckpointTokenPreservedOnFailure(t *testing.T) {
-	// Verifies that after a failed checkpoint (retryable, exhausted),
+	// Verifies that after a failed checkpoint (retryable),
 	// the token remains at its pre-call value so the next attempt uses
 	// the correct token.
 	throttleErr := &smithy.GenericAPIError{
@@ -483,7 +447,7 @@ func TestCheckpointTokenPreservedOnFailure(t *testing.T) {
 		checkpoint: func(_ context.Context, in CheckpointInput) (CheckpointOutput, error) {
 			// Verify the token being sent is always the initial one.
 			if in.CheckpointToken != "token-initial" {
-				t.Errorf("retry sent wrong token: %q", in.CheckpointToken)
+				t.Errorf("checkpoint sent wrong token: %q", in.CheckpointToken)
 			}
 			return CheckpointOutput{}, throttleErr
 		},
@@ -553,12 +517,9 @@ func emptyGetState(_ context.Context, _ GetExecutionStateInput) (GetExecutionSta
 	return GetExecutionStateOutput{}, nil
 }
 
-// Verify the existing token rotation tests still exercise the old
-// behavior (non-classified errors from fakeLambda still propagate through
-// the retry logic and are classified).
-func TestCheckpointRetryWithTokenRotation(t *testing.T) {
-	// After a successful checkpoint preceded by retryable failures,
-	// subsequent calls use the new token.
+func TestCheckpointTokenRotationAfterFailedCall(t *testing.T) {
+	// A failed call leaves the token unchanged, so the next call sends the
+	// same token. After a successful call, later calls use the new token.
 	var mu sync.Mutex
 	callCount := 0
 	tokens := []string{}
@@ -573,32 +534,25 @@ func TestCheckpointRetryWithTokenRotation(t *testing.T) {
 			if n == 1 {
 				return CheckpointOutput{}, &smithy.GenericAPIError{Code: "ServiceException", Fault: smithy.FaultServer}
 			}
-			tok := "token-" + strconv.Itoa(n)
-			return CheckpointOutput{
-				CheckpointToken: tok,
-			}, nil
+			return CheckpointOutput{CheckpointToken: "token-" + strconv.Itoa(n)}, nil
 		},
 		getState: emptyGetState,
 	}
 
 	cp := newCheckpointer(fake, "arn:test", "token-0")
+	if err := cp.checkpoint(context.Background(), nil); err == nil {
+		t.Fatal("first checkpoint() = nil, want the server fault")
+	}
 	if err := cp.checkpoint(context.Background(), nil); err != nil {
-		t.Fatalf("checkpoint() = %v", err)
-	}
-	if cp.currentToken() != "token-2" {
-		t.Errorf("token = %q, want %q", cp.currentToken(), "token-2")
-	}
-
-	// Second call should use the rotated token.
-	if err := cp.checkpoint(context.Background(), []OperationUpdate{}); err != nil {
 		t.Fatalf("checkpoint() 2 = %v", err)
 	}
+	if err := cp.checkpoint(context.Background(), []OperationUpdate{}); err != nil {
+		t.Fatalf("checkpoint() 3 = %v", err)
+	}
 	mu.Lock()
-	if len(tokens) < 3 {
-		t.Fatalf("expected at least 3 calls, got %d", len(tokens))
+	defer mu.Unlock()
+	want := []string{"token-0", "token-0", "token-2"}
+	if !slices.Equal(tokens, want) {
+		t.Errorf("tokens sent = %v, want %v", tokens, want)
 	}
-	if tokens[2] != "token-2" {
-		t.Errorf("third call used token %q, want %q", tokens[2], "token-2")
-	}
-	mu.Unlock()
 }

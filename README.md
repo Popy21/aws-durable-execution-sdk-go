@@ -110,6 +110,13 @@ write CloudWatch Logs, and it needs the two Lambda API actions the SDK
 calls, `lambda:CheckpointDurableExecution` and
 `lambda:GetDurableExecutionState`.
 
+The SDK calls these APIs through a Lambda client built from the default
+AWS config. The client sets a 5 second connect timeout, a 50 second
+response timeout, and a 55 second total request timeout. Its AWS standard
+retryer retries server faults, throttling, and connection errors. The SDK
+adds no retry of its own. A checkpoint call that still fails ends the
+invocation, and the service invokes the function again.
+
 ```console
 sam deploy --template-file template.yaml \
   --stack-name first-durable-function \

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed: the default client sets request timeouts, and checkpoint calls are not retried by the SDK
+
+The default Lambda client now sets a 5 second connect timeout, a 50
+second response timeout, and a 55 second total request timeout. Before, it
+set only the AWS SDK's 30 second connect timeout, so a call that connected
+and then stalled ran until the invocation deadline.
+
+The SDK no longer retries a checkpoint call itself. It makes one call per
+batch, and the client's own retryer is the only retry. The default
+client's AWS standard retryer makes up to 3 attempts for server faults,
+throttling, and connection errors. Before, the SDK also retried up to 3
+times, so one checkpoint could make up to 9 requests. A failure that
+remains after the client's retries ends the invocation, and the service
+invokes the execution again. A custom `ExecutionClient` brings its own
+retry; one that does not retry gets one attempt per invocation. In the
+classification rules below, "retried" refers to this client retry.
+
 ### Fixed: a suspending invocation no longer responds SUCCEEDED
 
 When an invocation starts to suspend, the SDK returns the suspension

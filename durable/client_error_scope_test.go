@@ -74,9 +74,9 @@ func TestClientErrorExecutionScopeFromCheckpointFailsExecution(t *testing.T) {
 }
 
 func TestClientErrorInvocationScopeFromCheckpointFailsInvocation(t *testing.T) {
-	// The client states the failure is transient. The SDK retries the
-	// checkpoint, and when every attempt fails the invocation ends with an
-	// error rather than a FAILED response, so the execution resumes later.
+	// The client states the failure is transient. The SDK makes one
+	// checkpoint call, and the invocation ends with an error rather than a
+	// FAILED response, so the execution resumes later.
 	var calls atomic.Int32
 	cause := errors.New("timeout")
 	fake := &fakeLambdaFunc{
@@ -92,8 +92,8 @@ func TestClientErrorInvocationScopeFromCheckpointFailsInvocation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Invoke returned response %s, want an error", raw)
 	}
-	if got := calls.Load(); got != int32(checkpointMaxAttempts) {
-		t.Errorf("checkpoint calls = %d, want %d", got, checkpointMaxAttempts)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("checkpoint calls = %d, want 1", got)
 	}
 	var ce *CheckpointError
 	if !errors.As(err, &ce) {
@@ -111,8 +111,8 @@ func TestClientErrorInvocationScopeFromCheckpointFailsInvocation(t *testing.T) {
 }
 
 func TestClientErrorZeroScopeFromCheckpointIsInvocation(t *testing.T) {
-	// An unclassified ClientError is read as invocation-scoped: it is
-	// retried and ends the invocation, not the execution.
+	// An unclassified ClientError is read as invocation-scoped: it ends
+	// the invocation, not the execution.
 	var calls atomic.Int32
 	fake := &fakeLambdaFunc{
 		getState: emptyGetState,
@@ -126,8 +126,8 @@ func TestClientErrorZeroScopeFromCheckpointIsInvocation(t *testing.T) {
 	if raw, err := h(context.Background(), stepPayload(`"evt"`)); err == nil {
 		t.Fatalf("Invoke returned response %s, want an error", raw)
 	}
-	if got := calls.Load(); got != int32(checkpointMaxAttempts) {
-		t.Errorf("checkpoint calls = %d, want %d", got, checkpointMaxAttempts)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("checkpoint calls = %d, want 1", got)
 	}
 }
 

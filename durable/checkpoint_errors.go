@@ -23,9 +23,12 @@ const (
 	// ErrorScopeInvocation means the current invocation cannot continue but
 	// the execution can resume in a new one. It fits transient conditions:
 	// timeouts, throttling, connection failures, and server-side errors.
-	// The SDK retries a checkpoint call that fails with this scope before
-	// giving up on the invocation, except for a stale checkpoint token,
-	// which a newer invocation has superseded and no retry can revive.
+	// The SDK makes one checkpoint call and does not retry it; the default
+	// client's standard retryer is the only retry. A call that still fails
+	// with this scope ends the invocation, and the service invokes the
+	// execution again. A stale checkpoint token is the exception to
+	// retryability: a newer invocation has superseded it, and no retry can
+	// revive it.
 	ErrorScopeInvocation ErrorScope = "INVOCATION"
 
 	// ErrorScopeExecution means the execution cannot proceed and must fail.
@@ -106,9 +109,10 @@ func (e *ClientError) effectiveScope() ErrorScope {
 //
 // Retryable is derived from the scope: it is true when Scope is
 // [ErrorScopeInvocation], with one exception. An invocation-scoped failure
-// is transient, so the SDK retries the checkpoint call before giving up on
-// the invocation. An execution-scoped failure is permanent, so the SDK does
-// not retry it.
+// is transient. The SDK makes one checkpoint call, and the default client's
+// standard retryer is the only retry; a failure that remains ends the
+// invocation, and the service invokes the execution again. An
+// execution-scoped failure is permanent, so it fails the execution.
 //
 // The exception is a stale checkpoint token. The service rejects a
 // checkpoint whose token a newer invocation has superseded. The failure is
@@ -225,8 +229,9 @@ func IsCheckpointRetryable(err error) bool {
 //     execution scope.
 //  8. Anything else, such as a network error, a context deadline, or a
 //     timeout → invocation scope, retryable. Transient conditions are the
-//     most common cause of unstructured errors, the retry loop is bounded,
-//     and assuming a failure is transient is the safe default: the
+//     most common cause of unstructured errors, the SDK makes one call and
+//     the default client's standard retryer is the only retry, and
+//     assuming a failure is transient is the safe default: the
 //     execution gets another attempt rather than being failed on the
 //     strength of an error the SDK does not understand.
 //
