@@ -327,9 +327,15 @@ func clientErrorScope(err error) ErrorScope {
 // wherever the error surfaces.
 //
 // The scope comes from the first of these found in err's chain:
-//  1. A [CheckpointError] with a known scope. The checkpoint path already
+//  1. The error an operation reports when its serdes returned a
+//     [RetryableSerdesError]. The serdes marked the failure transient, so
+//     its scope is [ErrorScopeInvocation] whatever error the serdes
+//     wrapped: a [ClientError] or [CheckpointError] inside it describes
+//     the cause, not how the SDK must act. A RetryableSerdesError that
+//     handler code returns itself, without a serdes call, states no scope.
+//  2. A [CheckpointError] with a known scope. The checkpoint path already
 //     classified the failure, so its verdict is used as is.
-//  2. A [ClientError]. The client stated the scope directly; see
+//  3. A [ClientError]. The client stated the scope directly; see
 //     [ClientError] for how an unknown scope value is read.
 //
 // A CheckpointError without a scope, such as one rebuilt by
@@ -339,6 +345,10 @@ func clientErrorScope(err error) ErrorScope {
 // is an ordinary failure of the execution, while an error from a client
 // call outside the handler is presumed transient.
 func failureScope(err error, unclassified ErrorScope) ErrorScope {
+	if isSerdesInvocationEnd(err) {
+		return ErrorScopeInvocation
+	}
+
 	var ce *CheckpointError
 	if errors.As(err, &ce) {
 		if s := ce.Scope(); s == ErrorScopeInvocation || s == ErrorScopeExecution {

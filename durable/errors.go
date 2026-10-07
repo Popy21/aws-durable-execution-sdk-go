@@ -1285,10 +1285,11 @@ const (
 	serdesDirectionUnmarshal = "unmarshal"
 )
 
-// newSerdesError wraps a failure at a configurable [Serdes] boundary,
-// carrying the operation name and the direction that failed. Every
-// Marshal/Unmarshal call on an operation's serdes reports failure through
-// this wrapper; internal envelope serialization does not.
+// newSerdesError wraps a permanent failure at a configurable [Serdes]
+// boundary, carrying the operation name and the direction that failed.
+// Operations reach it through [execContext.serdesFailure], which decides
+// whether a failure is permanent; internal envelope serialization does
+// not report through it.
 func newSerdesError(operation, direction string, cause error) *SerdesError {
 	return &SerdesError{Operation: operation, Direction: direction, Err: cause}
 }

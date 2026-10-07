@@ -112,7 +112,7 @@ func CreateCallback[O any](ctx Context, name string, opts ...CallbackOption) (*C
 			}
 			info.EndTimestamp = op.endTimestamp
 			dispatchOperationEnd(ec, info, PluginOperationSucceeded)
-			cb := resolveCallbackSuccess[O](ec.Context, op, id, name, serdes, ec.serdesCtx(id))
+			cb := resolveCallbackSuccess[O](ec, op, id, name, serdes, ec.serdesCtx(id))
 			return cb, nil
 
 		case statusFailed, statusTimedOut:
@@ -246,7 +246,7 @@ func WaitForCallback[O any](ctx Context, name string, submitter func(ctx StepCon
 			dispatchReplayedContextEnd(ec, id, name, OperationSubTypeWaitForCallback, op, nil)
 			var out O
 			if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.childCtx.result), &out); err != nil {
-				return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+				return zero, ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 			}
 			return out, nil
 
@@ -315,7 +315,14 @@ func WaitForCallback[O any](ctx Context, name string, submitter func(ctx StepCon
 	// Checkpoint ContextSucceeded.
 	serialized, serr := serdes.Marshal(ec.Context, ec.serdesCtx(id), result)
 	if serr != nil {
-		return zero, newSerdesError(name, serdesDirectionMarshal, serr)
+		return zero, ec.serdesFailure(name, serdesDirectionMarshal, serr)
+	}
+	// Round-trip for consistency (first-run == replay). Decode before
+	// recording the success, so a transient failure ends the invocation
+	// with no outcome recorded.
+	out, decodeErr := decodeLiveResult[O](ec, serdes, id, name, serialized)
+	if isSerdesInvocationEnd(decodeErr) {
+		return zero, decodeErr
 	}
 	update := wfcbContextUpdate(ec, id, name, OperationActionSucceed)
 	update.Payload = aws.String(string(serialized))
@@ -327,10 +334,8 @@ func WaitForCallback[O any](ctx Context, name string, submitter func(ctx StepCon
 	}
 	dispatchContextEnd(ec, opInfo, string(serialized), nil)
 
-	// Round-trip for consistency (first-run == replay).
-	var out O
-	if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), serialized, &out); err != nil {
-		return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+	if decodeErr != nil {
+		return zero, decodeErr
 	}
 	return out, nil
 }
@@ -472,7 +477,7 @@ func observeCallbackOutcome[O any](ec *execContext, op *operation, id, name stri
 			info.Result = op.callback.result
 		}
 		dispatchOperationEnd(ec, info, PluginOperationSucceeded)
-		cb := resolveCallbackSuccess[O](ec.Context, op, id, name, serdes, ec.serdesCtx(id))
+		cb := resolveCallbackSuccess[O](ec, op, id, name, serdes, ec.serdesCtx(id))
 		return cb.future.value, cb.future.err
 	case statusFailed, statusTimedOut:
 		_, cbErr := resolveCallbackFailure[O](op, name)
@@ -486,7 +491,7 @@ func observeCallbackOutcome[O any](ec *execContext, op *operation, id, name stri
 
 // resolveCallbackSuccess creates a pre-settled callback for a SUCCEEDED
 // checkpointed status.
-func resolveCallbackSuccess[O any](ctx context.Context, op *operation, id, name string, serdes Serdes, sctx SerdesContext) *Callback[O] {
+func resolveCallbackSuccess[O any](ec *execContext, op *operation, id, name string, serdes Serdes, sctx SerdesContext) *Callback[O] {
 	if op.callback == nil {
 		fut := newFailedFuture[O](fmt.Errorf("durable: callback %q: SUCCEEDED but no callback details", name))
 		return &Callback[O]{id: "", future: fut}
@@ -498,8 +503,8 @@ func resolveCallbackSuccess[O any](ctx context.Context, op *operation, id, name 
 		return &Callback[O]{id: op.callback.callbackID, future: newSettledFuture(zero, nil)}
 	}
 	var out O
-	if err := serdes.Unmarshal(ctx, sctx, []byte(op.callback.result), &out); err != nil {
-		fut := newFailedFuture[O](newSerdesError(name, serdesDirectionUnmarshal, err))
+	if err := serdes.Unmarshal(ec.Context, sctx, []byte(op.callback.result), &out); err != nil {
+		fut := newFailedFuture[O](ec.serdesFailure(name, serdesDirectionUnmarshal, err))
 		return &Callback[O]{id: op.callback.callbackID, future: fut}
 	}
 	return &Callback[O]{id: op.callback.callbackID, future: newSettledFuture(out, nil)}

@@ -216,7 +216,7 @@ func runStep[O any](ec *execContext, id, name string, fn func(StepContext) (O, e
 				dispatchOperationStart(ec, info, PluginOperationSucceeded)
 				var out O
 				if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &out); err != nil {
-					return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+					return zero, ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 				}
 				info.EndTimestamp = op.endTimestamp
 				dispatchOperationEnd(ec, info, PluginOperationSucceeded)
@@ -415,18 +415,25 @@ func executeStepAttempt[O any](ec *execContext, id, name string, fn func(StepCon
 
 	serialized, err := options.serdes.Marshal(ec.Context, ec.serdesCtx(id), result)
 	if err != nil {
-		wrapped := newSerdesError(name, serdesDirectionMarshal, err)
+		failure := ec.serdesFailure(name, serdesDirectionMarshal, err)
 		dispatchNotification(ec.operationHooks(), func(p *Plugin) {
 			if p.OnOperationAttemptEnd != nil {
 				p.OnOperationAttemptEnd(ec, AttemptEndHookInfo{
 					OperationHookInfo: attemptInfo.OperationHookInfo,
 					Attempt:           attempt,
 					Outcome:           PluginAttemptFailed,
-					Error:             wrapped,
+					Error:             failure,
 				})
 			}
 		})
-		return settleStepFailure[O](ec, id, name, options, wrapped, nil, attempt)
+		if isSerdesInvocationEnd(failure) {
+			// A transient serdes failure records nothing: the
+			// invocation ends and the attempt runs again in the next.
+			return zero, failure
+		}
+		// The result cannot be stored, and storing it again cannot
+		// succeed, so the retry strategy is not consulted.
+		return failStep[O](ec, id, name, failure, nil, attempt)
 	}
 
 	if sizeErr := checkResultSize(serialized, name); sizeErr != nil {
@@ -441,6 +448,26 @@ func executeStepAttempt[O any](ec *execContext, id, name string, fn func(StepCon
 			}
 		})
 		return settleStepFailure[O](ec, id, name, options, sizeErr, nil, attempt)
+	}
+
+	// Decode the value as replay will see it: from the serialized
+	// payload, so first execution and replay observe an identical result.
+	// The decode runs before the success is recorded, so a transient
+	// failure ends the invocation with no outcome and the next invocation
+	// runs the attempt again.
+	out, decodeErr := decodeLiveResult[O](ec, options.serdes, id, name, serialized)
+	if isSerdesInvocationEnd(decodeErr) {
+		dispatchNotification(ec.operationHooks(), func(p *Plugin) {
+			if p.OnOperationAttemptEnd != nil {
+				p.OnOperationAttemptEnd(ec, AttemptEndHookInfo{
+					OperationHookInfo: attemptInfo.OperationHookInfo,
+					Attempt:           attempt,
+					Outcome:           PluginAttemptFailed,
+					Error:             decodeErr,
+				})
+			}
+		})
+		return zero, decodeErr
 	}
 
 	update := stepUpdate(ec, id, name, OperationActionSucceed)
@@ -463,14 +490,30 @@ func executeStepAttempt[O any](ec *execContext, id, name string, fn func(StepCon
 		}
 	})
 
-	// Return the value as it will be seen on replay: deserialized from
-	// the checkpointed payload, so first execution and replay observe an
-	// identical result.
-	var out O
-	if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), serialized, &out); err != nil {
-		return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+	if decodeErr != nil {
+		return zero, decodeErr
 	}
 	return out, nil
+}
+
+// failStep checkpoints a terminal FAIL of the step recording cause, and
+// returns the [*StepError] the caller receives. It does not consult the
+// retry strategy. settleStepFailure calls it when the strategy stops. A
+// failure no retry can resolve, such as a result the serdes cannot
+// marshal, calls it directly, so the step body runs once. trace is the
+// stack trace captured where the failure arose; nil when there is none.
+func failStep[O any](ec *execContext, id, name string, cause error, trace []string, attempt int) (O, error) {
+	var zero O
+	rec := recordOf(cause).withTrace(trace)
+	update := stepUpdate(ec, id, name, OperationActionFail)
+	update.Error = errorObjectFromRecord(rec)
+	if err := ec.checkpointer.checkpoint(ec, []OperationUpdate{update}); err != nil {
+		if errors.Is(err, errCheckpointTerminated) {
+			return zero, errSuspendExecution
+		}
+		return zero, err
+	}
+	return zero, newStepError(name, attempt, rec)
 }
 
 // settleStepFailure consults the retry strategy for a failed attempt and
@@ -480,19 +523,11 @@ func executeStepAttempt[O any](ec *execContext, id, name string, fn func(StepCon
 func settleStepFailure[O any](ec *execContext, id, name string, options stepOptions, cause error, trace []string, attempt int) (O, error) {
 	var zero O
 
-	rec := recordOf(cause).withTrace(trace)
 	decision := options.retry(RetryAttempt{Err: cause, Attempt: attempt})
 	if !decision.Retry {
-		update := stepUpdate(ec, id, name, OperationActionFail)
-		update.Error = errorObjectFromRecord(rec)
-		if err := ec.checkpointer.checkpoint(ec, []OperationUpdate{update}); err != nil {
-			if errors.Is(err, errCheckpointTerminated) {
-				return zero, errSuspendExecution
-			}
-			return zero, err
-		}
-		return zero, newStepError(name, attempt, rec)
+		return failStep[O](ec, id, name, cause, trace, attempt)
 	}
+	rec := recordOf(cause).withTrace(trace)
 
 	update := stepUpdate(ec, id, name, OperationActionRetry)
 	update.Error = errorObjectFromRecord(rec)

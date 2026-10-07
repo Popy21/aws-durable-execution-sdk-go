@@ -215,8 +215,9 @@ func (cp *checkpointer) terminate() {
 }
 
 // halt terminates the checkpointer because the service will accept no
-// further checkpoints from this invocation, and records end as the error
-// the invocation must end with. The first recorded cause wins: a later
+// further checkpoints from this invocation, or because a serdes reported a
+// transient failure and the invocation must end without recording more
+// state. It records end as the error the invocation must end with. The first recorded cause wins: a later
 // failure cannot change how the invocation ends. halt runs before the
 // requests in the failed call learn of the failure, so the handler always
 // sees the cause when it reads haltCause after the user function returns.

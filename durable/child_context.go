@@ -379,7 +379,7 @@ func RunInChildContext[O any](ctx Context, name string, fn func(Context) (O, err
 			}
 			var out O
 			if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.childCtx.result), &out); err != nil {
-				return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+				return zero, ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 			}
 			return out, nil
 
@@ -476,7 +476,13 @@ func RunInChildContext[O any](ctx Context, name string, fn func(Context) (O, err
 
 	serialized, err := options.serdes.Marshal(ec.Context, ec.serdesCtx(id), result)
 	if err != nil {
-		return zero, newSerdesError(name, serdesDirectionMarshal, err)
+		return zero, ec.serdesFailure(name, serdesDirectionMarshal, err)
+	}
+	// Decode before recording the success, so a transient failure ends
+	// the invocation with no outcome recorded.
+	out, decodeErr := decodeLiveResult[O](ec, options.serdes, id, name, serialized)
+	if isSerdesInvocationEnd(decodeErr) {
+		return zero, decodeErr
 	}
 	update := childUpdate(ec, id, name, subType, OperationActionSucceed)
 	if len(serialized) > checkpointSizeLimitBytes {
@@ -499,9 +505,8 @@ func RunInChildContext[O any](ctx Context, name string, fn func(Context) (O, err
 	}
 	dispatchContextEnd(ec, opInfo, aws.ToString(update.Payload), nil)
 
-	var out O
-	if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), serialized, &out); err != nil {
-		return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+	if decodeErr != nil {
+		return zero, decodeErr
 	}
 	return out, nil
 }
@@ -646,7 +651,16 @@ func RunInChildContextAsync[O any](ctx Context, name string, fn func(Context) (O
 
 		serialized, serr := options.serdes.Marshal(ec.Context, ec.serdesCtx(id), result)
 		if serr != nil {
-			fut.settle(result, newSerdesError(name, serdesDirectionMarshal, serr))
+			fut.settle(result, ec.serdesFailure(name, serdesDirectionMarshal, serr))
+			return
+		}
+		// Round-trip through serdes for consistency with the blocking
+		// variant (first-run value == replay value). Decode before
+		// recording the success, so a transient failure ends the
+		// invocation with no outcome recorded.
+		out, decodeErr := decodeLiveResult[O](ec, options.serdes, id, name, serialized)
+		if isSerdesInvocationEnd(decodeErr) {
+			fut.settle(result, decodeErr)
 			return
 		}
 		update := childUpdate(ec, id, name, subType, OperationActionSucceed)
@@ -675,11 +689,8 @@ func RunInChildContextAsync[O any](ctx Context, name string, fn func(Context) (O
 		}
 		dispatchContextEnd(ec, opInfo, aws.ToString(update.Payload), nil)
 
-		// Round-trip through serdes for consistency with the blocking
-		// variant (first-run value == replay value).
-		var out O
-		if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), serialized, &out); err != nil {
-			fut.settle(result, newSerdesError(name, serdesDirectionUnmarshal, err))
+		if decodeErr != nil {
+			fut.settle(result, decodeErr)
 			return
 		}
 		fut.settle(out, nil)
@@ -942,13 +953,13 @@ func virtualChildSuccess[O any](ec *execContext, start OperationHookInfo, name s
 	var zero O
 	serialized, err := options.serdes.Marshal(ec.Context, ec.serdesCtx(start.ID), result)
 	if err != nil {
-		failure := newSerdesError(name, serdesDirectionMarshal, err)
+		failure := ec.serdesFailure(name, serdesDirectionMarshal, err)
 		dispatchVirtualContextEnd(ec, start, "", failure)
 		return zero, failure
 	}
 	var out O
 	if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(start.ID), serialized, &out); err != nil {
-		failure := newSerdesError(name, serdesDirectionUnmarshal, err)
+		failure := ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 		dispatchVirtualContextEnd(ec, start, "", failure)
 		return zero, failure
 	}
@@ -976,7 +987,7 @@ func resolveTerminalChild[O any](ec *execContext, op *operation, id, name, subTy
 		}
 		var out O
 		if err := options.serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.childCtx.result), &out); err != nil {
-			return newFailedFuture[O](newSerdesError(name, serdesDirectionUnmarshal, err))
+			return newFailedFuture[O](ec.serdesFailure(name, serdesDirectionUnmarshal, err))
 		}
 		return newSettledFuture(out, nil)
 

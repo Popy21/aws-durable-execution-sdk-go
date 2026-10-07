@@ -206,6 +206,12 @@ const lambdaResponseSizeLimit = 6*1024*1024 - 50
 // writes the same text, so one log query finds the record in both.
 const tokenWithdrawnMessage = "Checkpoint response contained no CheckpointToken: the service will accept no further checkpoints from this invocation. Suspending; the execution continues on the next invocation."
 
+// executionSerdesOperation is the [SerdesError.Operation] of a failure to
+// decode the handler's input or encode its result. The failure is recorded
+// on the execution itself, so one fixed value separates it from the
+// failure of a named operation's serdes.
+const executionSerdesOperation = "execution"
+
 // errSuspendExecution signals that the current invocation must end with a
 // PENDING response because execution is blocked on pending operations
 // (waits, callbacks, in-flight invokes). It is internal control flow that
@@ -266,7 +272,13 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 	var event I
 	if raw, ok := customerInput(&in.InitialExecutionState); ok {
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
-			return nil, fmt.Errorf("durable: deserialize customer input: %w", err)
+			// The input is fixed for the life of the execution, so
+			// every later invocation would fail to decode it the
+			// same way. Fail the execution instead of the invocation.
+			return respond(wire.InvocationResponse{
+				Status: wire.StatusFailed,
+				Error:  errorObjectFromError(newSerdesError(executionSerdesOperation, serdesDirectionUnmarshal, err), nil),
+			})
 		}
 	}
 
@@ -637,9 +649,15 @@ func (h *durableHandler[I, O]) Invoke(ctx context.Context, payload []byte) ([]by
 		}
 		serialized, serr := json.Marshal(wrapResult)
 		if serr != nil {
-			err := fmt.Errorf("durable: serialize handler result: %w", serr)
-			failInvocationEnd(PluginInvocationRetrying, err)
-			return nil, err
+			// The result is deterministic, so a later invocation
+			// would fail to encode it the same way. Fail the
+			// execution instead of the invocation.
+			err := newSerdesError(executionSerdesOperation, serdesDirectionMarshal, serr)
+			failInvocationEnd(PluginInvocationFailed, err)
+			return respond(wire.InvocationResponse{
+				Status: wire.StatusFailed,
+				Error:  errorObjectFromError(err, nil),
+			})
 		}
 		if len(serialized) > lambdaResponseSizeLimit {
 			// The result exceeds what the response envelope can carry

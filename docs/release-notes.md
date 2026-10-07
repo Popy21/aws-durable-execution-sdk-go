@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Changed: a serdes failure is permanent and catchable, with a transient opt-in
+
+A serdes failure is now permanent by default, and no retry strategy
+retries it. A step whose result its serdes cannot marshal checkpoints a
+terminal failure and returns a `*StepError` whose `ErrorType` is
+`"SerdesError"`, so the step body runs once. Before, the step retry
+strategy retried it, and under the default `ExponentialBackoff` the body
+ran 6 times. Every other operation keeps returning a `*SerdesError`.
+
+The new `RetryableSerdesError(err)` marks a serdes failure transient, and
+`ErrRetryableSerdes` matches it with `errors.Is`. The operation records no
+outcome, and the SDK ends only the current invocation, even when the
+handler catches the error. The service invokes the execution again from
+its last checkpoint. In a `Map` or `Parallel` item it ends the invocation
+instead of producing a failed item.
+
+A handler event that does not decode into the event type, or a handler
+result that does not encode, now fails the execution with a `SerdesError`
+whose `Operation` is `"execution"`. Before, the invocation ended with an
+error, and every later invocation failed the same way until the execution
+timed out.
+
 ### Changed: a checkpoint response without a token is classified by what the call carried
 
 A checkpoint response without a `CheckpointToken` means the service will

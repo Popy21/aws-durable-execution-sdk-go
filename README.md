@@ -720,6 +720,20 @@ records a reference in the checkpoint. In the default
 durable mount such as Amazon EFS, not at the ephemeral `/tmp` of the
 function.
 
+A serdes failure is permanent by default. The operation fails with a
+`*durable.SerdesError`, which names the operation and the `Direction`,
+`"marshal"` or `"unmarshal"`. A step fails with a `*durable.StepError`
+whose `ErrorType` is `"SerdesError"`. The step retry strategy is not
+consulted, so the step body runs once. The caller may catch the error.
+When the handler returns it, the execution settles `FAILED`. A handler
+event that does not decode, or a handler result that does not encode,
+fails the execution the same way, with a `SerdesError` whose `Operation`
+is `"execution"`. To mark a failure transient, return
+`durable.RetryableSerdesError(err)` from `Marshal` or `Unmarshal`. The SDK
+then records no outcome for the operation and ends only the current
+invocation, even when the handler catches the error, and the service
+invokes the execution again from its last checkpoint.
+
 ```go
 func handler(ctx durable.Context, _ any) (string, error) {
 	upper := durable.SerdesOf(

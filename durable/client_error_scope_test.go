@@ -281,9 +281,9 @@ func TestClientErrorInvocationScopeFromPluginFailsInvocation(t *testing.T) {
 }
 
 func TestFailureScope(t *testing.T) {
-	// failureScope reads a CheckpointError's known scope first, then a
-	// ClientError's effective scope, and otherwise returns the caller's
-	// default. Each case is run against both defaults so the table shows
+	// failureScope reads a serdes invocation end first, then a
+	// CheckpointError's known scope, then a ClientError's effective scope,
+	// and otherwise returns the caller's default. Each case is run against both defaults so the table shows
 	// which results depend on the default.
 	tests := []struct {
 		name string
@@ -307,6 +307,27 @@ func TestFailureScope(t *testing.T) {
 			// classified from; the CheckpointError's scope is read first.
 			name: "CheckpointError wrapping ClientError",
 			err:  fmt.Errorf("w: %w", classifyCheckpointError(&ClientError{Scope: ErrorScopeExecution, Err: errors.New("x")})),
+			want: ErrorScopeExecution,
+		},
+		{
+			// A serdes marked the failure transient. The scope of the
+			// error it wrapped describes the cause and is not read.
+			name: "serdes invocation end wrapping execution ClientError",
+			err: (*execContext)(nil).serdesFailure("s", serdesDirectionMarshal,
+				RetryableSerdesError(&ClientError{Scope: ErrorScopeExecution, Err: errors.New("x")})),
+			want: ErrorScopeInvocation,
+		},
+		{
+			name: "serdes invocation end wrapping execution CheckpointError",
+			err: (*execContext)(nil).serdesFailure("s", serdesDirectionUnmarshal,
+				RetryableSerdesError(&CheckpointError{Err: errors.New("x"), scope: ErrorScopeExecution})),
+			want: ErrorScopeInvocation,
+		},
+		{
+			// Handler code returned a RetryableSerdesError without a
+			// serdes call; it states no scope of its own.
+			name: "bare RetryableSerdesError wrapping execution ClientError",
+			err:  RetryableSerdesError(&ClientError{Scope: ErrorScopeExecution, Err: errors.New("x")}),
 			want: ErrorScopeExecution,
 		},
 	}

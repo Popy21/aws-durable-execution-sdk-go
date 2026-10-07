@@ -168,7 +168,7 @@ func runInvoke[O, I any](ec *execContext, id, name, functionID string, input I, 
 
 	payload, err := options.payloadSerdes.Marshal(ec.Context, ec.serdesCtx(id), input)
 	if err != nil {
-		return zero, newSerdesError(name, serdesDirectionMarshal, err)
+		return zero, ec.serdesFailure(name, serdesDirectionMarshal, err)
 	}
 
 	// Check the serialized input size before checkpointing START.
@@ -249,7 +249,7 @@ func invokeOutcome[O any](ec *execContext, op *operation, id, name, functionID s
 	dispatchOperationEnd(ec, info, PluginOperationSucceeded)
 	var out O
 	if err := options.resultSerdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.invoke.result), &out); err != nil {
-		return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+		return zero, ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 	}
 	return out, nil
 }

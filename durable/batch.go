@@ -1412,7 +1412,13 @@ func runPreClaimedBatchItem[O any](
 
 	serialized, serErr := options.itemSerdes.Marshal(ec.Context, ec.serdesCtx(childID), result)
 	if serErr != nil {
-		return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionMarshal, serErr)
+		return BatchItem[O]{}, ec.serdesFailure(batchItemOpName(itemName, index), serdesDirectionMarshal, serErr)
+	}
+	// Decode before recording the success, so a transient failure ends
+	// the invocation with no outcome recorded.
+	out, decodeErr := decodeLiveResult[O](ec, options.itemSerdes, childID, batchItemOpName(itemName, index), serialized)
+	if isSerdesInvocationEnd(decodeErr) {
+		return BatchItem[O]{}, decodeErr
 	}
 	update := batchChildUpdate(ec, childID, itemName, childSubType, parentID, OperationActionSucceed)
 	if len(serialized) > checkpointSizeLimitBytes {
@@ -1424,9 +1430,8 @@ func runPreClaimedBatchItem[O any](
 		return BatchItem[O]{}, err
 	}
 	dispatchBatchItemEnd(ec, parentID, itemStart, aws.ToString(update.Payload), nil)
-	var out O
-	if err := options.itemSerdes.Unmarshal(ec.Context, ec.serdesCtx(childID), serialized, &out); err != nil {
-		return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionUnmarshal, err)
+	if decodeErr != nil {
+		return BatchItem[O]{}, decodeErr
 	}
 	return BatchItem[O]{
 		Index:  index,
@@ -1553,11 +1558,11 @@ func runFlatBatchItem[O any](
 	sctx := virtualChild.serdesCtx(childID)
 	serialized, serErr := options.itemSerdes.Marshal(virtualChild.Context, sctx, result)
 	if serErr != nil {
-		return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionMarshal, serErr)
+		return BatchItem[O]{}, virtualChild.serdesFailure(batchItemOpName(itemName, index), serdesDirectionMarshal, serErr)
 	}
 	var out O
 	if err := options.itemSerdes.Unmarshal(virtualChild.Context, sctx, serialized, &out); err != nil {
-		return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionUnmarshal, err)
+		return BatchItem[O]{}, virtualChild.serdesFailure(batchItemOpName(itemName, index), serdesDirectionUnmarshal, err)
 	}
 
 	return BatchItem[O]{
@@ -1636,7 +1641,15 @@ func runNestedBatchItem[O any](
 	// Serialize and checkpoint the child success.
 	serialized, serErr := options.itemSerdes.Marshal(ec.Context, ec.serdesCtx(childID), result)
 	if serErr != nil {
-		return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionMarshal, serErr)
+		return BatchItem[O]{}, ec.serdesFailure(batchItemOpName(itemName, index), serdesDirectionMarshal, serErr)
+	}
+
+	// Round-trip through serdes for live == replay consistency. Decode
+	// before recording the success, so a transient failure ends the
+	// invocation with no outcome recorded.
+	out, decodeErr := decodeLiveResult[O](ec, options.itemSerdes, childID, batchItemOpName(itemName, index), serialized)
+	if isSerdesInvocationEnd(decodeErr) {
+		return BatchItem[O]{}, decodeErr
 	}
 
 	update := batchChildUpdate(ec, childID, itemName, childSubType, parentID, OperationActionSucceed)
@@ -1650,10 +1663,8 @@ func runNestedBatchItem[O any](
 	}
 	dispatchBatchItemEnd(ec, parentID, itemStart, aws.ToString(update.Payload), nil)
 
-	// Round-trip through serdes for live == replay consistency.
-	var out O
-	if err := options.itemSerdes.Unmarshal(ec.Context, ec.serdesCtx(childID), serialized, &out); err != nil {
-		return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionUnmarshal, err)
+	if decodeErr != nil {
+		return BatchItem[O]{}, decodeErr
 	}
 
 	return BatchItem[O]{
@@ -1701,7 +1712,7 @@ func replayTerminalChildItem[O any](
 		dispatchBatchItemReplayedEnd(ec, parentID, childID, itemName, childSubType, op, nil)
 		var out O
 		if err := options.itemSerdes.Unmarshal(ec.Context, ec.serdesCtx(childID), []byte(op.childCtx.result), &out); err != nil {
-			return BatchItem[O]{}, newSerdesError(batchItemOpName(itemName, index), serdesDirectionUnmarshal, err)
+			return BatchItem[O]{}, ec.serdesFailure(batchItemOpName(itemName, index), serdesDirectionUnmarshal, err)
 		}
 		return BatchItem[O]{
 			Index:  index,
@@ -1779,7 +1790,7 @@ func replayTerminalBatch[I, O any](
 		if options.resultSerdes != nil {
 			var result BatchResult[O]
 			if err := options.resultSerdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.childCtx.result), &result); err != nil {
-				return BatchResult[O]{}, newSerdesError(name, serdesDirectionUnmarshal, err)
+				return BatchResult[O]{}, ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 			}
 			return result, nil
 		}
@@ -1795,7 +1806,8 @@ func replayTerminalBatch[I, O any](
 			child := ec.child(id, name, ec.owner, mode)
 			return replayBatchChildren[I, O](child, id, name, items, fn, options, parentSubType, childSubType)
 		}
-		return toBatchResult[O](ec.Context, payload, options.itemSerdes, batchItemSerdesCtx(ec, options))
+		res, err := toBatchResult[O](ec.Context, payload, options.itemSerdes, batchItemSerdesCtx(ec, options))
+		return res, ec.reportSerdesError(err)
 
 	case statusFailed:
 		errType := "Error"
@@ -1901,12 +1913,12 @@ func checkpointBatchSuccess[O any](
 	if options.resultSerdes != nil {
 		serialized, serErr = options.resultSerdes.Marshal(ec.Context, ec.serdesCtx(id), result)
 		if serErr != nil {
-			return BatchResult[O]{}, newSerdesError(name, serdesDirectionMarshal, serErr)
+			return BatchResult[O]{}, ec.serdesFailure(name, serdesDirectionMarshal, serErr)
 		}
 	} else {
 		payload, payloadErr := fromBatchResult(ec.Context, result, options.itemSerdes, batchItemSerdesCtx(ec, options))
 		if payloadErr != nil {
-			return BatchResult[O]{}, payloadErr
+			return BatchResult[O]{}, ec.reportSerdesError(payloadErr)
 		}
 		serialized, serErr = json.Marshal(payload)
 	}

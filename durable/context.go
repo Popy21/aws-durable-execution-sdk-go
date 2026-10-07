@@ -141,6 +141,15 @@ type SerdesContext struct {
 // serdes written for one result type, use [SerdesOf], which performs the
 // type assertion once and hands typed values to your marshal and unmarshal
 // functions.
+//
+// A Serdes failure is permanent by default. The operation fails once with
+// a [*SerdesError]; a step fails with a [*StepError] whose ErrorType is
+// "SerdesError". The step retry strategy is not consulted, so a step body
+// runs once. The caller may catch the error; when the handler returns it,
+// the execution fails. To mark a failure transient, return
+// [RetryableSerdesError] from Marshal or Unmarshal. The SDK then ends only
+// the current invocation, and the service invokes the execution again
+// from its last checkpoint.
 type Serdes interface {
 	Marshal(ctx context.Context, meta SerdesContext, v any) ([]byte, error)
 	Unmarshal(ctx context.Context, meta SerdesContext, data []byte, v any) error

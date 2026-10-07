@@ -120,7 +120,7 @@ func runWaitForCondition[S any](ec *execContext, id, name string, check func(Ste
 				dispatchOperationEnd(ec, info, PluginOperationSucceeded)
 				var out S
 				if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &out); err != nil {
-					return zero, newSerdesError(name, serdesDirectionUnmarshal, err)
+					return zero, ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 				}
 				return out, nil
 
@@ -268,7 +268,7 @@ func executeWaitForConditionAttempt[S any](ec *execContext, id, name string, che
 		if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), []byte(op.step.result), &currentState); err != nil {
 			// The checkpointed state cannot be reconstructed; the
 			// operation cannot continue with a consistent view of it.
-			return zero, "", newSerdesError(name, serdesDirectionUnmarshal, err)
+			return zero, "", ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 		}
 	} else {
 		currentState = cfg.InitialState
@@ -354,7 +354,7 @@ func executeWaitForConditionAttempt[S any](ec *execContext, id, name string, che
 	// Serialize the new state for checkpointing.
 	serialized, err := serdes.Marshal(ec.Context, ec.serdesCtx(id), newState)
 	if err != nil {
-		return zero, "", newSerdesError(name, serdesDirectionMarshal, err)
+		return zero, "", ec.serdesFailure(name, serdesDirectionMarshal, err)
 	}
 
 	// OnOperationAttemptEnd with SUCCEEDED outcome (check ran without error).
@@ -372,7 +372,7 @@ func executeWaitForConditionAttempt[S any](ec *execContext, id, name string, che
 	// value see the same representation that replay will produce.
 	var deserialized S
 	if err := serdes.Unmarshal(ec.Context, ec.serdesCtx(id), serialized, &deserialized); err != nil {
-		return zero, "", newSerdesError(name, serdesDirectionUnmarshal, err)
+		return zero, "", ec.serdesFailure(name, serdesDirectionUnmarshal, err)
 	}
 
 	// Consult the wait strategy with the deserialized state, substituting

@@ -418,10 +418,11 @@ func TestRootResultCheckpointExecutionScopeFiresFailedHookOnce(t *testing.T) {
 	}
 }
 
-func TestRootResultSerializationFailureFiresRetryingHook(t *testing.T) {
-	// When the handler result cannot be serialized, the invocation returns
-	// the error to Lambda. Exactly one RETRYING OnInvocationEnd hook must
-	// fire carrying the returned error, and the success hook must NOT
+func TestRootResultSerializationFailureFiresFailedHook(t *testing.T) {
+	// When the handler result cannot be serialized, the execution fails:
+	// the result is deterministic, so a later invocation could not encode
+	// it either. Exactly one FAILED OnInvocationEnd hook must fire
+	// carrying the recorded SerdesError, and the success hook must NOT
 	// fire.
 	var hooks []InvocationEndHookInfo
 	fake := &fakeLambdaFunc{getState: emptyGetState}
@@ -436,21 +437,29 @@ func TestRootResultSerializationFailureFiresRetryingHook(t *testing.T) {
 		return make(chan int), nil // json.Marshal fails on channels
 	}, withLambdaAPI(fake), WithPlugins(plugin))
 
-	_, err := h(context.Background(), stepPayload(`""`))
-	if err == nil {
-		t.Fatal("Invoke succeeded despite unserializable result")
+	out, err := h(context.Background(), stepPayload(`""`))
+	if err != nil {
+		t.Fatalf("Invoke returned an invocation error, want a FAILED response: %v", err)
 	}
-	if !strings.Contains(err.Error(), "serialize handler result") {
-		t.Fatalf("error = %v, want result serialization failure", err)
+	var resp struct {
+		Status string
+		Error  *struct{ ErrorType, ErrorMessage string }
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Status != "FAILED" || resp.Error == nil || resp.Error.ErrorType != "SerdesError" {
+		t.Fatalf("response = %s, want FAILED with ErrorType SerdesError", out)
 	}
 	if len(hooks) != 1 {
 		t.Fatalf("OnInvocationEnd fired %d times, want exactly 1", len(hooks))
 	}
-	if hooks[0].Status != PluginInvocationRetrying {
-		t.Errorf("hook Status = %q, want %q", hooks[0].Status, PluginInvocationRetrying)
+	if hooks[0].Status != PluginInvocationFailed {
+		t.Errorf("hook Status = %q, want %q", hooks[0].Status, PluginInvocationFailed)
 	}
-	if hooks[0].ExecutionError != err { //nolint:errorlint // identity check is intentional
-		t.Errorf("hook ExecutionError = %v, want the exact returned error %v", hooks[0].ExecutionError, err)
+	var se *SerdesError
+	if !errors.As(hooks[0].ExecutionError, &se) || se.Operation != "execution" || se.Direction != "marshal" {
+		t.Errorf("hook ExecutionError = %v, want a *SerdesError for operation \"execution\", direction \"marshal\"", hooks[0].ExecutionError)
 	}
 }
 
